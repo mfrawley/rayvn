@@ -1,0 +1,29 @@
+# Shipped suggestions: public repositories that serve groupIds Central does not.
+# A hint only moves a matching repository to the front of the queue; others are still asked on a miss.
+# Entries are keyed by URL (repository ids are local names). A hint whose URL isn't among the
+# repositories in use is ignored, so this list never adds a repository by itself.
+# Seeded from one real project's cold resolve (about 370 artifacts); extend it as more are measured.
+
+[[hint]]
+url = "https://repo.osgeo.org/repository/release"
+groups = ["org.geotools.*", "it.geosolutions.*", "org.eclipse.imagen.*"]
+
+[[hint]]
+url = "https://jogamp.org/deployment/maven"
+groups = ["org.jogamp.*"]
+
+[[hint]]
+url = "https://mvn.slimjars.com"
+groups = ["com.slimjars.*"]
+
+[[hint]]
+url = "https://mvn.topobyte.de"
+groups = ["de.topobyte.*"]
+
+[[hint]]
+url = "https://maven.conveyal.com"
+groups = ["com.conveyal.*"]
+
+[[hint]]
+url = "https://jitpack.io"
+groups = ["com.github.conveyal.*", "com.github.matsim-org.*"]

@@ -1,0 +1,19 @@
+# Build output
+/target
+
+# Rust formatting backups
+**/*.rs.bk
+
+# Debug symbols (MSVC)
+*.pdb
+
+# Claude Code local settings (machine-specific permissions)
+.claude/settings.local.json
+
+# Private working notes (real project names, measurements); kept locally, not published
+/STATUS.md
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
