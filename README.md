@@ -21,12 +21,16 @@ rvn <command> [-f pom.xml] [--locked] [--refresh] [--cold]
 | `resolve` | Print the dependency tree, one line per artifact, indented by depth. |
 | `classpath` | Print the classpath as colon-separated jar paths. `--test` includes test scope. |
 | `build` | Compile and package the jar into `target/`; shaded if the POM configures `maven-shade-plugin`. Prints the jar path on stdout. |
+| `test` | Compile the tests and run the unit tests (surefire settings), skipping the run when nothing changed. See `docs/testing.md`. |
+| `verify` | `test`, then package, then the integration tests (failsafe settings). |
 
 | Flag | Meaning |
 |---|---|
 | `-f <path>` | Use this POM instead of `./pom.xml`. The lockfile goes beside it. |
 | `--locked` | Fail if `rayvn.lock` is missing or stale, instead of resolving. |
 | `--refresh` | Ignore `rayvn.lock` and the miss cache for this run; the lock is rewritten. |
+| `--test-cache <dir>` | `test`/`verify`: store test results here (also `RAYVN_TEST_CACHE`, `[test] cache_dir`). |
+| `--rerun` | `test`/`verify`: ignore the test result cache for this run. |
 | `--cold` | Use a throwaway cache, deleted afterwards. Implies `--refresh`. Not allowed with `classpath`. |
 
 Progress and summaries go to stderr and results to stdout, so output pipes cleanly.
@@ -39,16 +43,17 @@ rvn fetch                         # CI: restore exactly the locked set
 rvn build --locked                # CI: fail rather than re-resolve
 rvn test                          # compile src/test/java, run surefire-selected JUnit 5 tests
 rvn verify                        # test, package, then run failsafe-selected integration tests
+rvn test --rerun                  # run the tests even if their inputs are unchanged
 rvn resolve | grep guava          # which version of guava did we get?
 java -cp "$(rvn classpath):target/classes" app.Main
 rvn lock --cold                   # time a resolve from an empty cache
 rvn --version                     # commit, build time and name of this binary
 ```
 
-Environment: `RAYVN_LOCAL_REPO` (cache location), `RAYVN_RO_REPO` (read-only cache layers), `RAYVN_DEBUG_HTTP=1` (print each request and status), `RAYVN_NO_BANNER=1` (hide the banner). Routing and credentials: `docs/routing.md`, `docs/credentials.md`.
+Environment: `RAYVN_LOCAL_REPO` (cache location), `RAYVN_RO_REPO` (read-only cache layers), `RAYVN_DEBUG_HTTP=1` (print each request and status), `RAYVN_NO_BANNER=1` (hide the banner), `RAYVN_TEST_CACHE` (where test results are stored). Routing and credentials: `docs/routing.md`, `docs/credentials.md`.
 
 ## Where things are
 
 - `proposals/`: design decisions, numbered, not rewritten after the fact.
-- `docs/`: user documentation (`routing.md`, `credentials.md`).
+- `docs/`: user documentation (`routing.md`, `credentials.md`, `testing.md`).
 - API docs: `cargo doc --no-deps --open`. Examples in them run under `cargo test`.

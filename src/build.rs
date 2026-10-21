@@ -12,14 +12,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use zip::write::SimpleFileOptions;
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+/// All files below `dir`, sorted; a missing directory has none.
+pub(crate) fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    walk_filtered(dir, &|_| false, out)
+}
+
+/// Like [`walk`], but entries (files or directories) for which `skip` is true are left out.
+pub(crate) fn walk_filtered(dir: &Path, skip: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
     }
     for e in std::fs::read_dir(dir)? {
         let p = e?.path();
+        if skip(&p) {
+            continue;
+        }
         if p.is_dir() {
-            walk(&p, out)?;
+            walk_filtered(&p, skip, out)?;
         } else {
             out.push(p);
         }

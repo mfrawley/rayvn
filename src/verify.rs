@@ -5,11 +5,14 @@
 use crate::build::{compile, copy_resources, glob, java_sources};
 use crate::model::{Effective, interpolate};
 use crate::pom::TestCfg;
+use crate::settings::TestSettings;
+use crate::testcache::{self, KeyInputs, Outcome, Verdict, parse_summary};
 use crate::repos::Repos;
 use crate::resolve::Resolved;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 const SUREFIRE_INCLUDES: [&str; 4] = ["**/Test*.java", "**/*Test.java", "**/*Tests.java", "**/*TestCase.java"];
 const FAILSAFE_INCLUDES: [&str; 3] = ["**/IT*.java", "**/*IT.java", "**/*ITCase.java"];
@@ -90,35 +93,182 @@ fn java_command(classpath: &[String], jvm_args: &[String], classes: &[String]) -
     cmd
 }
 
-/// Runs the selected tests of `phase`; returns false when none were selected or the phase is skipped.
-pub fn run(phase: Phase, root: &Effective, dir: &Path, test_classes: &Path, main_classes: &Path, resolved: &[Resolved], repos: &Repos) -> Result<bool> {
-    let cfg = match phase {
-        Phase::Unit => root.surefire.clone().unwrap_or_default(),
-        Phase::Integration => root.failsafe.clone().unwrap_or_default(),
-    };
-    if skipped(&cfg, root) {
-        eprintln!("  {} skipped by the POM", phase.label());
-        return Ok(false);
+/// What to do for one phase, decided from the POM and `rayvn.toml` alone.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Selection {
+    /// The POM skips the phase (`skipTests`, `skipITs`, ...).
+    Skipped,
+    /// No test class matched the includes.
+    Empty,
+    Run(Plan),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Plan {
+    pub classes: Vec<String>,
+    pub jvm_args: Vec<String>,
+    /// May a stored pass stand in for a run?
+    pub use_cache: bool,
+    pub shards: usize,
+}
+
+/// Pure planning step: which classes run, with which JVM arguments, cached or not, in how many JVMs.
+/// `sources` are the paths below `src/test/java`; `rerun` (`--rerun`) turns the cache off.
+pub fn plan(phase: Phase, cfg: &TestCfg, root: &Effective, sources: &[String], settings: &TestSettings, rerun: bool) -> Selection {
+    if skipped(cfg, root) {
+        return Selection::Skipped;
     }
+    let defaults: &[&str] = if phase == Phase::Unit { &SUREFIRE_INCLUDES } else { &FAILSAFE_INCLUDES };
+    let classes: Vec<String> = select_tests(sources, cfg, defaults).iter().map(|s| class_name(s)).collect();
+    if classes.is_empty() {
+        return Selection::Empty;
+    }
+    let cacheable = match phase {
+        Phase::Unit => settings.cache.unwrap_or(true),
+        Phase::Integration => settings.cache_integration.unwrap_or(false),
+    };
+    let jvm_args = cfg.arg_line.iter().flat_map(|a| interpolate(a, &root.props).split_whitespace().map(String::from).collect::<Vec<_>>()).collect();
+    Selection::Run(Plan { classes, jvm_args, use_cache: cacheable && !rerun, shards: settings.shards.unwrap_or(1).max(1) })
+}
+
+/// `(coordinates, sha256)` of every resolved jar; a jar without a checksum is identified by its path.
+fn jar_inputs(resolved: &[Resolved]) -> Vec<(String, String)> {
+    resolved
+        .iter()
+        .filter(|r| r.jar.is_some())
+        .map(|r| {
+            let coords = format!("{}:{}", r.gav, r.classifier.as_deref().unwrap_or(""));
+            (coords, r.sha256.clone().unwrap_or_else(|| r.jar.as_ref().map(|p| p.display().to_string()).unwrap_or_default()))
+        })
+        .collect()
+}
+
+fn prefixed(prefix: &str, files: Vec<(String, String)>) -> impl Iterator<Item = (String, String)> {
+    files.into_iter().map(move |(p, h)| (format!("{prefix}/{p}"), h))
+}
+
+/// Where test results are stored: `--test-cache`, else `RAYVN_TEST_CACHE`, else `[test] cache_dir` (relative to the
+/// project), else `target/rayvn-test-cache`. Empty values count as unset.
+pub fn cache_dir(flag: Option<&str>, env: Option<&str>, configured: Option<&str>, project: &Path) -> PathBuf {
+    fn set(v: Option<&str>) -> Option<&str> {
+        v.filter(|s| !s.is_empty())
+    }
+    match (set(flag), set(env), set(configured)) {
+        (Some(p), _, _) | (None, Some(p), _) => PathBuf::from(p),
+        (None, None, Some(p)) => project.join(p),
+        _ => project.join("target/rayvn-test-cache"),
+    }
+}
+
+/// Record name for one project and phase, so that projects can share a cache directory.
+fn record_name(root: &Effective, phase: Phase) -> String {
+    format!("{}.{}.{}", root.gav.group, root.gav.artifact, phase.name())
+}
+
+/// The version banner of the `java` on PATH (`java -version` prints to stderr).
+fn jdk_version() -> Result<String> {
+    let out = Command::new("java").arg("-version").output().context("running java -version")?;
+    Ok(String::from_utf8_lossy(&out.stderr).trim().to_string())
+}
+
+/// Copies `reader` to `out` line by line, each line behind `prefix`, and returns everything read. Pass an unlocked
+/// `Stdout`: each line is written atomically, and parallel shards must not hold the lock between lines.
+fn pump(reader: impl std::io::BufRead, prefix: &str, out: &mut impl Write) -> Result<String> {
+    let mut all = String::new();
+    for line in reader.lines() {
+        let line = line?;
+        writeln!(out, "{prefix}{line}")?;
+        all.push_str(&line);
+        all.push('\n');
+    }
+    Ok(all)
+}
+
+/// Runs `cmd`, streaming its output to stdout behind `prefix`, and reports success and the launcher's summary.
+fn run_command(mut cmd: Command, prefix: &str) -> Result<Outcome> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().context("running java")?;
+    let stdout = child.stdout.take().context("no stdout from java")?;
+    let output = pump(std::io::BufReader::new(stdout), prefix, &mut std::io::stdout())?;
+    let status = child.wait()?;
+    Ok(Outcome { success: status.success(), summary: parse_summary(&output) })
+}
+
+/// Everything `run` needs to know about the build; keeps the parameter list short.
+pub struct TestRun<'a> {
+    pub root: &'a Effective,
+    pub dir: &'a Path,
+    pub main_classes: &'a Path,
+    pub test_classes: &'a Path,
+    pub resolved: &'a [Resolved],
+    pub repos: &'a Repos,
+    pub settings: &'a TestSettings,
+    pub rerun: bool,
+    /// Value of `--test-cache`, if given.
+    pub cache_flag: Option<&'a str>,
+}
+
+impl Phase {
+    fn name(self) -> &'static str {
+        match self {
+            Phase::Unit => "unit",
+            Phase::Integration => "integration",
+        }
+    }
+}
+
+/// Runs (or serves from the cache) the tests of `phase`. Returns false when nothing ran or was cached.
+pub fn run(phase: Phase, cx: &TestRun) -> Result<bool> {
+    let cfg = match phase {
+        Phase::Unit => cx.root.surefire.clone(),
+        Phase::Integration => cx.root.failsafe.clone(),
+    }
+    .unwrap_or_default();
     for i in &cfg.ignored {
         eprintln!("  warning: test option not supported by rayvn, ignored: {i}");
     }
-    let defaults: &[&str] = if phase == Phase::Unit { &SUREFIRE_INCLUDES } else { &FAILSAFE_INCLUDES };
-    let classes: Vec<String> = select_tests(&relative_sources(&dir.join("src/test/java"))?, &cfg, defaults).iter().map(|s| class_name(s)).collect();
-    if classes.is_empty() {
-        eprintln!("  no {} selected", phase.label());
-        return Ok(false);
-    }
-    let launcher = console_launcher(repos, resolved)?;
-    let mut classpath = vec![test_classes.display().to_string(), main_classes.display().to_string()];
-    classpath.extend(resolved.iter().filter_map(|r| r.jar.as_ref().map(|p| p.display().to_string())));
+    let sources = relative_sources(&cx.dir.join("src/test/java"))?;
+    let plan = match plan(phase, &cfg, cx.root, &sources, cx.settings, cx.rerun) {
+        Selection::Skipped => {
+            eprintln!("  {} skipped by the POM", phase.label());
+            return Ok(false);
+        }
+        Selection::Empty => {
+            eprintln!("  no {} selected", phase.label());
+            return Ok(false);
+        }
+        Selection::Run(p) => p,
+    };
+    let key = testcache::key(&KeyInputs {
+        jdk: jdk_version()?,
+        jvm_args: plan.jvm_args.clone(),
+        classes: plan.classes.clone(),
+        jars: jar_inputs(cx.resolved),
+        files: prefixed("main", testcache::hash_tree(cx.main_classes)?)
+            .chain(prefixed("test", testcache::hash_tree(cx.test_classes)?))
+            .chain(prefixed("input", testcache::hash_declared(cx.dir, &cx.settings.inputs)?))
+            .collect(),
+    });
+    let launcher = console_launcher(cx.repos, cx.resolved)?;
+    let mut classpath = vec![cx.test_classes.display().to_string(), cx.main_classes.display().to_string()];
+    classpath.extend(cx.resolved.iter().filter_map(|r| r.jar.as_ref().map(|p| p.display().to_string())));
     // Last, so the project's own JUnit jars win; both are the same version.
     classpath.push(launcher.display().to_string());
-    let jvm_args: Vec<String> = cfg.arg_line.iter().flat_map(|a| interpolate(a, &root.props).split_whitespace().map(String::from).collect::<Vec<_>>()).collect();
-    eprintln!("  running {} {} with JUnit", classes.len(), phase.label());
-    let status = java_command(&classpath, &jvm_args, &classes).current_dir(dir).status().context("running java")?;
-    if !status.success() {
-        bail!("{} failed", phase.label());
+
+    let shards = testcache::split_shards(&plan.classes, plan.shards);
+    let store = cache_dir(cx.cache_flag, std::env::var("RAYVN_TEST_CACHE").ok().as_deref(), cx.settings.cache_dir.as_deref(), cx.dir);
+    let verdict = testcache::run_cached(&store, &record_name(cx.root, phase), &key, plan.use_cache, || {
+        eprintln!("  running {} {} with JUnit in {} JVM(s)", plan.classes.len(), phase.label(), shards.len());
+        testcache::run_shards(&shards, |i, classes| {
+            let prefix = if shards.len() > 1 { format!("[{}] ", i + 1) } else { String::new() };
+            let mut cmd = java_command(&classpath, &plan.jvm_args, classes);
+            cmd.current_dir(cx.dir);
+            run_command(cmd, &prefix)
+        })
+    })?;
+    match verdict {
+        Verdict::Cached(r) => eprintln!("  {} up to date: {} passed (cached, inputs unchanged; --rerun to force)", phase.label(), r.summary.successful),
+        Verdict::Ran(o) if o.success => eprintln!("  {} passed{}", phase.label(), o.summary.map(|s| format!(": {}", s.successful)).unwrap_or_default()),
+        Verdict::Ran(_) => bail!("{} failed", phase.label()),
     }
     Ok(true)
 }
@@ -176,5 +326,139 @@ mod tests {
         let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(&args[..4], ["-Xmx1g", "-cp", "a:b", "org.junit.platform.console.ConsoleLauncher"]);
         assert_eq!(&args[args.len() - 4..], ["--select-class", "x.A", "--select-class", "x.B"]);
+    }
+
+    fn root_with(props: &[(&str, &str)]) -> Effective {
+        Effective {
+            gav: crate::pom::Gav::new("g", "a", "1"),
+            packaging: "jar".into(),
+            props: props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            managed: Default::default(),
+            deps: vec![],
+            repos: vec![],
+            shade: None,
+            surefire: None,
+            failsafe: None,
+        }
+    }
+
+    fn planned(phase: Phase, cfg: &TestCfg, settings: &TestSettings, rerun: bool) -> Selection {
+        plan(phase, cfg, &root_with(&[("skipITs", "false")]), &files(), settings, rerun)
+    }
+
+    fn run_plan(sel: Selection) -> Plan {
+        match sel {
+            Selection::Run(p) => p,
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_selects_classes_and_caches_unit_tests_by_default() {
+        let p = run_plan(planned(Phase::Unit, &TestCfg::default(), &TestSettings::default(), false));
+        assert_eq!(p.classes, ["a.FooTest", "a.TestBar", "FooTests"]);
+        assert_eq!((p.use_cache, p.shards), (true, 1));
+    }
+
+    #[test]
+    fn integration_tests_are_cached_only_on_request() {
+        let off = run_plan(planned(Phase::Integration, &TestCfg::default(), &TestSettings::default(), false));
+        assert!(!off.use_cache);
+        let on = TestSettings { cache_integration: Some(true), ..Default::default() };
+        assert!(run_plan(planned(Phase::Integration, &TestCfg::default(), &on, false)).use_cache);
+    }
+
+    #[test]
+    fn rerun_and_cache_false_both_turn_the_cache_off() {
+        assert!(!run_plan(planned(Phase::Unit, &TestCfg::default(), &TestSettings::default(), true)).use_cache);
+        let off = TestSettings { cache: Some(false), ..Default::default() };
+        assert!(!run_plan(planned(Phase::Unit, &TestCfg::default(), &off, false)).use_cache);
+    }
+
+    #[test]
+    fn shards_default_to_one_and_never_to_zero() {
+        let two = TestSettings { shards: Some(2), ..Default::default() };
+        assert_eq!(run_plan(planned(Phase::Unit, &TestCfg::default(), &two, false)).shards, 2);
+        let zero = TestSettings { shards: Some(0), ..Default::default() };
+        assert_eq!(run_plan(planned(Phase::Unit, &TestCfg::default(), &zero, false)).shards, 1);
+    }
+
+    #[test]
+    fn plan_reports_skipped_and_empty_phases() {
+        let skip = TestCfg { skips: vec!["true".into()], ..Default::default() };
+        assert_eq!(planned(Phase::Unit, &skip, &TestSettings::default(), false), Selection::Skipped);
+        let none = TestCfg { includes: vec!["**/Nothing.java".into()], ..Default::default() };
+        assert_eq!(planned(Phase::Unit, &none, &TestSettings::default(), false), Selection::Empty);
+    }
+
+    #[test]
+    fn plan_splits_and_interpolates_the_arg_line() {
+        let cfg = TestCfg { arg_line: Some("-Xmx${mem}  -ea".into()), ..Default::default() };
+        let sel = plan(Phase::Unit, &cfg, &root_with(&[("mem", "2g")]), &files(), &TestSettings::default(), false);
+        assert_eq!(run_plan(sel).jvm_args, ["-Xmx2g", "-ea"]);
+    }
+
+    #[test]
+    fn jar_inputs_use_checksums_and_fall_back_to_paths() {
+        let r = |sha: Option<&str>, jar: Option<&str>, classifier: Option<&str>| Resolved {
+            gav: crate::pom::Gav::new("g", "a", "1"),
+            scope: "compile".into(),
+            classifier: classifier.map(Into::into),
+            depth: 1,
+            via: None,
+            jar: jar.map(PathBuf::from),
+            typ: "jar".into(),
+            repo: None,
+            sha256: sha.map(Into::into),
+        };
+        let got = jar_inputs(&[r(Some("h"), Some("/x.jar"), None), r(None, Some("/y.jar"), Some("tests")), r(None, None, None)]);
+        assert_eq!(got, [("g:a:1:".to_string(), "h".to_string()), ("g:a:1:tests".to_string(), "/y.jar".to_string())]);
+    }
+
+    #[test]
+    fn pump_prefixes_each_line_and_returns_the_text() {
+        let mut out = Vec::new();
+        let all = pump(std::io::Cursor::new("one\ntwo\n"), "[1] ", &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "[1] one\n[1] two\n");
+        assert_eq!(all, "one\ntwo\n");
+    }
+
+    #[test]
+    fn run_command_reports_exit_status_and_summary() {
+        let mut ok = Command::new("sh");
+        ok.args(["-c", "echo '[ 2 tests found ]'; echo '[ 2 tests successful ]'; echo '[ 0 tests failed ]'"]);
+        assert_eq!(run_command(ok, "").unwrap(), Outcome { success: true, summary: Some(testcache::Summary { found: 2, successful: 2, failed: 0 }) });
+        let mut bad = Command::new("sh");
+        bad.args(["-c", "exit 3"]);
+        assert_eq!(run_command(bad, "").unwrap(), Outcome { success: false, summary: None });
+    }
+
+    #[test]
+    fn cache_dir_prefers_flag_then_env_then_config_then_default() {
+        let p = Path::new("/proj");
+        assert_eq!(cache_dir(Some("/f"), Some("/e"), Some("c"), p), PathBuf::from("/f"));
+        assert_eq!(cache_dir(None, Some("/e"), Some("c"), p), PathBuf::from("/e"));
+        assert_eq!(cache_dir(None, None, Some("c"), p), PathBuf::from("/proj/c"));
+        assert_eq!(cache_dir(None, None, None, p), PathBuf::from("/proj/target/rayvn-test-cache"));
+    }
+
+    #[test]
+    fn cache_dir_treats_empty_values_as_unset() {
+        assert_eq!(cache_dir(Some(""), Some(""), Some(""), Path::new("/p")), PathBuf::from("/p/target/rayvn-test-cache"));
+    }
+
+    #[test]
+    fn cache_dir_keeps_an_absolute_configured_path() {
+        assert_eq!(cache_dir(None, None, Some("/ci/cache"), Path::new("/p")), PathBuf::from("/ci/cache"));
+    }
+
+    #[test]
+    fn record_names_differ_by_project_and_phase() {
+        let a = root_with(&[]);
+        let mut b = root_with(&[]);
+        b.gav = crate::pom::Gav::new("g", "other", "1");
+        assert_eq!(record_name(&a, Phase::Unit), "g.a.unit");
+        assert_ne!(record_name(&a, Phase::Unit), record_name(&b, Phase::Unit));
+        assert_ne!(record_name(&a, Phase::Unit), record_name(&a, Phase::Integration));
     }
 }

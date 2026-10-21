@@ -25,7 +25,7 @@ fn print_banner() {
 }
 
 const COMMANDS: [&str; 7] = ["lock", "fetch", "resolve", "classpath", "build", "test", "verify"];
-const USAGE: &str = "usage: rvn <lock|fetch|resolve|classpath|build|test|verify> [-f pom.xml] [--locked] [--refresh] [--cold]";
+const USAGE: &str = "usage: rvn <lock|fetch|resolve|classpath|build|test|verify> [-f pom.xml] [--locked] [--refresh] [--cold] [--rerun] [--test-cache dir]";
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -35,6 +35,8 @@ struct Args {
     refresh: bool,
     cold: bool,
     test: bool,
+    rerun: bool,
+    test_cache: Option<String>,
 }
 
 impl Args {
@@ -46,11 +48,15 @@ impl Args {
             Some(i) => PathBuf::from(args.get(i + 1).context("-f needs a path")?),
             None => PathBuf::from("pom.xml"),
         };
+        let test_cache = match args.iter().position(|a| a == "--test-cache") {
+            Some(i) => Some(args.get(i + 1).context("--test-cache needs a directory")?.clone()),
+            None => None,
+        };
         let cold = flag("--cold");
         if cold && cmd == "classpath" {
             bail!("--cold deletes its cache afterwards, so `classpath` would print paths that no longer exist");
         }
-        Ok(Some(Args { cmd: cmd.clone(), pom_path, locked: flag("--locked"), refresh: cold || flag("--refresh"), cold, test: flag("--test") }))
+        Ok(Some(Args { cmd: cmd.clone(), pom_path, locked: flag("--locked"), refresh: cold || flag("--refresh"), cold, test: flag("--test"), rerun: flag("--rerun"), test_cache }))
     }
 
     fn project_dir(&self) -> PathBuf {
@@ -176,11 +182,21 @@ fn run() -> Result<()> {
             }
             let main_classes = build::compile_main(&root, &project_dir, &resolved)?;
             let test_classes = verify::compile_tests(&root, &project_dir, &main_classes, &resolved)?;
-            let run = |phase| verify::run(phase, &root, &project_dir, &test_classes, &main_classes, &resolved, &repos);
-            run(verify::Phase::Unit)?;
+            let cx = verify::TestRun {
+                root: &root,
+                dir: &project_dir,
+                main_classes: &main_classes,
+                test_classes: &test_classes,
+                resolved: &resolved,
+                repos: &repos,
+                settings: &config.test,
+                rerun: args.rerun,
+                cache_flag: args.test_cache.as_deref(),
+            };
+            verify::run(verify::Phase::Unit, &cx)?;
             if args.cmd == "verify" {
                 build::package(&root, &project_dir, &main_classes, &resolved)?;
-                run(verify::Phase::Integration)?;
+                verify::run(verify::Phase::Integration, &cx)?;
             }
             eprintln!("done in {:?}", t0.elapsed());
         }
@@ -219,6 +235,19 @@ mod tests {
         let a = parse(&["lock", "--cold"]).unwrap().unwrap();
         assert!(a.cold && a.refresh);
         assert!(parse(&["classpath", "--cold"]).is_err());
+    }
+
+    #[test]
+    fn rerun_flag_is_parsed() {
+        assert!(parse(&["test", "--rerun"]).unwrap().unwrap().rerun);
+        assert!(!parse(&["test"]).unwrap().unwrap().rerun);
+    }
+
+    #[test]
+    fn test_cache_flag_takes_a_directory() {
+        assert_eq!(parse(&["test", "--test-cache", "/ci"]).unwrap().unwrap().test_cache.as_deref(), Some("/ci"));
+        assert_eq!(parse(&["test"]).unwrap().unwrap().test_cache, None);
+        assert!(parse(&["test", "--test-cache"]).is_err());
     }
 
     #[test]

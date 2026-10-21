@@ -211,9 +211,40 @@ pub struct Config {
     /// How often a SNAPSHOT that rayvn downloaded is revalidated, in hours (default 24; 0 = every run).
     #[serde(default)]
     pub snapshot_ttl_hours: Option<u64>,
+    /// `[test]`: caching and sharding of `rvn test` / `rvn verify`.
+    #[serde(default)]
+    pub test: TestSettings,
     /// Extra cache directories that are read but never written (also `RAYVN_RO_REPO`, `:`-separated).
     #[serde(default)]
     pub read_only_repos: Vec<String>,
+}
+
+/// `[test]` in `rayvn.toml`. Every field is optional; a project file overrides the user file.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct TestSettings {
+    /// Skip unit tests whose inputs are unchanged since a pass (default true).
+    pub cache: Option<bool>,
+    /// The same for integration tests (default false: they usually read files rayvn cannot see).
+    pub cache_integration: Option<bool>,
+    /// Run the selected test classes in this many JVMs at once (default 1).
+    pub shards: Option<usize>,
+    /// Where results are stored; relative to the project. `--test-cache` and `RAYVN_TEST_CACHE` win over it.
+    pub cache_dir: Option<String>,
+    /// Ant-style globs, relative to the project, of extra files that can change a test's result.
+    #[serde(default)]
+    pub inputs: Vec<String>,
+}
+
+impl TestSettings {
+    /// `self` overridden by `later`: its set fields win, input globs add up.
+    pub fn overridden_by(mut self, later: TestSettings) -> TestSettings {
+        self.cache = later.cache.or(self.cache);
+        self.cache_integration = later.cache_integration.or(self.cache_integration);
+        self.shards = later.shards.or(self.shards);
+        self.cache_dir = later.cache_dir.or(self.cache_dir);
+        self.inputs.extend(later.inputs);
+        self
+    }
 }
 
 /// Extra repository, optionally authenticated from environment variables.
@@ -310,6 +341,7 @@ pub fn load_config(project_dir: &Path) -> Result<(Config, Vec<PathBuf>)> {
             cfg.central_second = cfg.central_second.or(c.central_second);
             cfg.miss_ttl_hours = cfg.miss_ttl_hours.or(c.miss_ttl_hours);
             cfg.snapshot_ttl_hours = cfg.snapshot_ttl_hours.or(c.snapshot_ttl_hours);
+            cfg.test = std::mem::take(&mut cfg.test).overridden_by(c.test);
             cfg.read_only_repos.extend(c.read_only_repos);
             cfg.repo.extend(c.repo);
             cfg.allow_http_auth.extend(c.allow_http_auth);
@@ -317,4 +349,25 @@ pub fn load_config(project_dir: &Path) -> Result<(Config, Vec<PathBuf>)> {
         }
     }
     Ok((cfg, inputs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_settings_later_file_wins_and_inputs_add_up() {
+        let user = TestSettings { cache: Some(true), shards: Some(2), inputs: vec!["a".into()], ..Default::default() };
+        let project = TestSettings { cache: Some(false), cache_integration: Some(true), inputs: vec!["b".into()], ..Default::default() };
+        let merged = user.overridden_by(project);
+        assert_eq!((merged.cache, merged.cache_integration, merged.shards), (Some(false), Some(true), Some(2)));
+        assert_eq!(merged.inputs, ["a", "b"]);
+    }
+
+    #[test]
+    fn test_section_parses_from_toml() {
+        let c: Config = toml::from_str("[test]\ncache_integration = true\nshards = 4\ninputs = [\"test/input/**\"]\n").unwrap();
+        assert_eq!((c.test.cache, c.test.cache_integration, c.test.shards), (None, Some(true), Some(4)));
+        assert_eq!(c.test.inputs, ["test/input/**"]);
+    }
 }
