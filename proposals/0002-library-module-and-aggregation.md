@@ -90,7 +90,7 @@ Jar diff against Maven (same commit, all 23 modules, 26 jars; `mvn package` 2:29
 
 What is left is not rayvn: Maven writes empty files as four NUL bytes; and one module resolved a different `analysis-0.4.7.jar` because the copy in `~/.m2` does not match its own `.sha1`. Gradle (`reproducibleFileOrder`, `preserveFileTimestamps = false`) and Bazel (fixed timestamps, sorted entries by default) make jars reproducible; rayvn now does too: every entry has the zip epoch as its time and mode 0644, entries are sorted, and `target/classes` is emptied before each compile so a deleted source or resource cannot linger. Two builds of all 23 modules, seconds apart, give identical jars.
 
-Not supported: the `protoc` and `exec` plugins (not run). No module needs them to build: `routing-map-conversion` has its protoc plugin commented out, and `aws-infra` declares `exec-maven-plugin` only for a manual `mvn exec:java`, bound to no phase. Left out on purpose: `archive`, which holds legacy and GUI code.
+Not supported: the `protoc` and `exec` plugins (not run). No validated module needs them yet (`docs/plugins.md`): `routing-map-conversion` has its protoc plugin commented out, and `aws-infra` declares `exec-maven-plugin` only for a manual `mvn exec:java`, bound to no phase. Left out on purpose: `archive`, which holds legacy and GUI code.
 
 ### Versions across modules
 
