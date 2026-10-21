@@ -37,6 +37,8 @@ rvn build                         # compile and package target/<artifact>-<versi
 rvn build -f services/api/pom.xml # a POM elsewhere
 rvn fetch                         # CI: restore exactly the locked set
 rvn build --locked                # CI: fail rather than re-resolve
+rvn test                          # compile src/test/java, run surefire-selected JUnit 5 tests
+rvn verify                        # test, package, then run failsafe-selected integration tests
 rvn resolve | grep guava          # which version of guava did we get?
 java -cp "$(rvn classpath):target/classes" app.Main
 rvn lock --cold                   # time a resolve from an empty cache

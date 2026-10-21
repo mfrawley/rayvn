@@ -33,6 +33,15 @@ What its POM uses, and the gap in rayvn today:
 4. **Shade parity.** Honour `finalName` and `shadedArtifactAttached`/`shadedClassifierName` so the output file names match Maven's.
 5. **Convergence check.** Report `dependencyConvergence` violations from the resolved graph, as a warning or an error when the POM enforces it. Needs no plugin code.
 
+### Results of running it (2026-10-21)
+
+- `rvn lock` and `rvn build` worked at once; the fat jar then differed from Maven's in three ways, all fixed or understood:
+  - shade `finalName` / `shadedArtifactAttached` naming: done (step 4).
+  - Scope mediation: an artifact reached by several paths must take the broadest scope (Maven), not the first path's. Fixed in `resolve.rs` (`widen_scopes`); `apiguardian-api` was wrongly `test` and missing from the fat jar.
+  - `test-jar` dependencies were deduplicated against the plain jar of the same artifact (classifier lost); fixed.
+- Remaining fat-jar diff: the project's own `META-INF/maven/<g>/<a>/pom.{properties,xml}` and directory entries. Harmless.
+- `rvn test` and `rvn verify` (steps 2, 3): done. 15 unit tests and 5 integration tests pass. Step 5 (convergence) is open.
+
 ### Decision: no plugin execution
 
 rayvn does not run Maven plugins (no JVM plugin host, no Mojo API). It reads a plugin's configuration from the POM and implements the behaviour natively for a short list of well-known plugins (compiler, shade, surefire, failsafe, enforcer's convergence rule, jar). Anything else is reported as ignored, as shade options already are. This keeps rayvn fast and single-binary, and is the main compatibility trade-off.

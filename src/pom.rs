@@ -30,15 +30,27 @@ impl std::fmt::Display for Gav {
     }
 }
 
+/// A `<dependency>` as written.
+/// [Dependency element reference](https://maven.apache.org/pom.html#dependencies)
 #[derive(Clone, Debug, Default)]
 pub struct Dep {
     pub group: String,
     pub artifact: String,
+    /// Absent when managed by `<dependencyManagement>`.
     pub version: Option<String>,
+    /// `compile` (default), `provided`, `runtime`, `test`, `system` or `import`; decides which classpaths see it and
+    /// whether it is transitive. [Scopes](https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html#dependency-scope)
     pub scope: Option<String>,
+    /// Optional dependencies are used by the declaring project but never passed on to its consumers.
+    /// [Optional dependencies](https://maven.apache.org/guides/introduction/introduction-to-optional-and-excludes-dependencies.html)
     pub optional: bool,
+    /// Selects a variant of the artifact, `<artifact>-<version>-<classifier>.<ext>` (e.g. `tests`, `sources`).
     pub classifier: Option<String>,
+    /// `<type>`, default `jar`; it implies extension and classifier (`test-jar` is `jar` with classifier `tests`).
+    /// [Artifact handlers](https://maven.apache.org/ref/current/maven-core/artifact-handlers.html)
     pub typ: String,
+    /// `(groupId, artifactId)` subtrees removed below this dependency, `*` allowed.
+    /// [Exclusions](https://maven.apache.org/guides/introduction/introduction-to-optional-and-excludes-dependencies.html)
     pub exclusions: Vec<(String, String)>,
 }
 
@@ -68,16 +80,73 @@ pub struct RawPom {
     pub modules: Vec<String>,
     profiles: Vec<Profile>,
     pub shade: Option<ShadeCfg>,
+    pub surefire: Option<TestCfg>,
+    pub failsafe: Option<TestCfg>,
+}
+
+/// What rayvn understands of `maven-surefire-plugin` (unit tests, phase `test`) and `maven-failsafe-plugin`
+/// (integration tests, phases `integration-test` and `verify`). Values are uninterpolated.
+/// [Surefire](https://maven.apache.org/surefire/maven-surefire-plugin/test-mojo.html),
+/// [Failsafe](https://maven.apache.org/surefire/maven-failsafe-plugin/integration-test-mojo.html)
+#[derive(Clone, Debug, Default)]
+pub struct TestCfg {
+    /// `<includes>`: ant-style globs over test source paths like `**/*Test.java`. Empty means the plugin's defaults
+    /// (surefire: `Test*`, `*Test`, `*Tests`, `*TestCase`; failsafe: `IT*`, `*IT`, `*ITCase`).
+    /// [Inclusions and exclusions](https://maven.apache.org/surefire/maven-surefire-plugin/examples/inclusion-exclusion.html)
+    pub includes: Vec<String>,
+    /// `<excludes>`: removed after the includes.
+    pub excludes: Vec<String>,
+    /// Raw `<skip>`, `<skipTests>`, `<skipITs>`, `<skipExec>` values, usually `${property}` references;
+    /// any that interpolates to `true` skips the phase.
+    /// [Skipping tests](https://maven.apache.org/surefire/maven-surefire-plugin/examples/skipping-tests.html)
+    pub skips: Vec<String>,
+    /// `<argLine>`: extra JVM arguments for the forked test JVM; `@{...}` late replacement is not supported.
+    /// [Using argLine](https://maven.apache.org/surefire/maven-surefire-plugin/examples/jvm-args.html)
+    pub arg_line: Option<String>,
+    /// Config rayvn does not implement.
+    pub ignored: Vec<String>,
+}
+
+fn plugin_config<'a, 'i>(root: Node<'a, 'i>, artifact: &str) -> Option<Option<Node<'a, 'i>>> {
+    let plugin = child(root, "build")
+        .and_then(|b| child(b, "plugins"))?
+        .children()
+        .find(|p| p.is_element() && text(*p, "artifactId").as_deref() == Some(artifact))?;
+    let exec = child(plugin, "executions").and_then(|e| e.children().find(|x| x.is_element()));
+    Some(exec.and_then(|e| child(e, "configuration")).or_else(|| child(plugin, "configuration")))
+}
+
+fn parse_tests(root: Node, artifact: &str) -> Option<TestCfg> {
+    let conf = plugin_config(root, artifact)?;
+    let mut cfg = TestCfg::default();
+    let Some(conf) = conf else { return Some(cfg) };
+    let list = |name: &str| child(conf, name).map(|n| n.children().filter(|c| c.is_element()).map(node_text).collect()).unwrap_or_default();
+    cfg.includes = list("includes");
+    cfg.excludes = list("excludes");
+    cfg.skips = ["skip", "skipTests", "skipITs", "skipExec"].iter().filter_map(|k| text(conf, k)).collect();
+    cfg.arg_line = text(conf, "argLine");
+    for k in ["systemPropertyVariables", "environmentVariables", "groups", "excludedGroups", "forkCount", "parallel", "reuseForks", "properties", "dependenciesToScan", "additionalClasspathElements", "test"] {
+        if child(conf, k).is_some() {
+            cfg.ignored.push(k.to_string());
+        }
+    }
+    Some(cfg)
 }
 
 /// What rayvn understands of `maven-shade-plugin`: fat jar, its name and attachment, services merge,
 /// signature excludes, manifest.
+/// [Shade plugin](https://maven.apache.org/plugins/maven-shade-plugin/shade-mojo.html)
 #[derive(Clone, Debug, Default)]
 pub struct ShadeCfg {
+    /// `ServicesResourceTransformer`: merge `META-INF/services/*` files instead of keeping only the first.
+    /// [Resource transformers](https://maven.apache.org/plugins/maven-shade-plugin/examples/resource-transformers.html)
     pub services: bool,
+    /// `ManifestResourceTransformer` `<mainClass>`: becomes `Main-Class` in the manifest.
     pub main_class: Option<String>,
+    /// `ManifestResourceTransformer` `<manifestEntries>`: extra manifest attributes.
     pub manifest: Vec<(String, String)>,
-    /// (artifact pattern like `*:*` or `group:artifact`, ant-style exclude globs)
+    /// `<filters>`: (artifact pattern like `*:*` or `group:artifact`, ant-style exclude globs).
+    /// [Selecting contents](https://maven.apache.org/plugins/maven-shade-plugin/examples/includes-excludes.html)
     pub excludes: Vec<(String, Vec<String>)>,
     /// `<finalName>`, uninterpolated: the shaded jar's file name without `.jar`.
     pub final_name: Option<String>,
@@ -90,12 +159,7 @@ pub struct ShadeCfg {
 }
 
 fn parse_shade(root: Node) -> Option<ShadeCfg> {
-    let plugin = child(root, "build")
-        .and_then(|b| child(b, "plugins"))?
-        .children()
-        .find(|p| p.is_element() && text(*p, "artifactId").as_deref() == Some("maven-shade-plugin"))?;
-    let exec = child(plugin, "executions").and_then(|e| e.children().find(|x| x.is_element()));
-    let conf = exec.and_then(|e| child(e, "configuration")).or_else(|| child(plugin, "configuration"));
+    let conf = plugin_config(root, "maven-shade-plugin")?;
     let mut cfg = ShadeCfg::default();
     let Some(conf) = conf else { return Some(cfg) };
     for t in child(conf, "transformers").into_iter().flat_map(|t| t.children().filter(|c| c.is_element())) {
@@ -373,6 +437,8 @@ fn parse_raw(xml: &str) -> Result<RawPom> {
         repos,
         modules,
         shade: parse_shade(root),
+        surefire: parse_tests(root, "maven-surefire-plugin"),
+        failsafe: parse_tests(root, "maven-failsafe-plugin"),
         profiles: child(root, "profiles").map(|p| p.children().filter(|c| c.is_element()).map(parse_profile).collect()).unwrap_or_default(),
     })
 }

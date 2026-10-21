@@ -8,16 +8,34 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-/// A POM with parent inheritance, property interpolation and BOM imports applied.
+/// A POM with parent inheritance, property interpolation and BOM imports applied: what Maven calls the
+/// [effective POM](https://maven.apache.org/guides/introduction/introduction-to-the-pom.html#super-pom)
+/// (`mvn help:effective-pom`), restricted to the parts rayvn uses.
 #[derive(Debug, Clone)]
 pub struct Effective {
+    /// `groupId:artifactId:version`; group and version fall back to the parent's when omitted
+    /// ([inheritance](https://maven.apache.org/guides/introduction/introduction-to-the-pom.html#project-inheritance)).
     pub gav: Gav,
+    /// `<packaging>`; rayvn builds `jar` only. [Lifecycle bindings](https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html#packaging)
     pub packaging: String,
+    /// `<properties>` of the chain (child wins) plus built-ins such as `project.version`, for `${...}` interpolation.
+    /// [Properties](https://maven.apache.org/guides/introduction/introduction-to-the-pom.html#using-properties)
     pub props: BTreeMap<String, String>,
+    /// `<dependencyManagement>` by `group:artifact:type:classifier`, parents and imported BOMs included. It pins versions
+    /// (and scopes) of transitive dependencies too, not only of direct ones.
+    /// [Dependency management](https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html#dependency-management)
     pub managed: HashMap<String, Dep>,
+    /// The project's own `<dependencies>`, with inherited ones merged in.
     pub deps: Vec<Dep>,
+    /// `<repositories>` declared by the POM and its parents (settings and mirrors come separately).
+    /// [Repositories](https://maven.apache.org/guides/introduction/introduction-to-repositories.html)
     pub repos: Vec<RepoDecl>,
+    /// `maven-shade-plugin` configuration, inherited from the parent when the child declares none.
     pub shade: Option<pom::ShadeCfg>,
+    /// `maven-surefire-plugin` (unit tests) configuration, likewise inherited.
+    pub surefire: Option<pom::TestCfg>,
+    /// `maven-failsafe-plugin` (integration tests) configuration, likewise inherited.
+    pub failsafe: Option<pom::TestCfg>,
 }
 
 pub struct Loader<'a> {
@@ -89,7 +107,9 @@ impl<'a> Loader<'a> {
             repos.extend(p.repos.iter().cloned());
         }
         let shade = raw.shade.or_else(|| parent.as_ref().and_then(|p| p.shade.clone()));
-        Ok(Effective { gav, packaging: raw.packaging, props, managed, deps, repos, shade })
+        let surefire = raw.surefire.or_else(|| parent.as_ref().and_then(|p| p.surefire.clone()));
+        let failsafe = raw.failsafe.or_else(|| parent.as_ref().and_then(|p| p.failsafe.clone()));
+        Ok(Effective { gav, packaging: raw.packaging, props, managed, deps, repos, shade, surefire, failsafe })
     }
 
     /// The parent's dependencyManagement plus this POM's own; imported BOMs fill in only what is not managed yet.
@@ -259,6 +279,8 @@ mod tests {
             deps,
             repos: vec![],
             shade: None,
+            surefire: None,
+            failsafe: None,
         }
     }
 

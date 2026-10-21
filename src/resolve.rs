@@ -10,15 +10,23 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+/// One artifact of the mediated dependency tree, as `mvn dependency:tree` would list it, plus where it came from.
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub gav: Gav,
+    /// Scope after mediation: the broadest any path to the artifact gives, narrowed by the scopes along that path.
+    /// [Scope table](https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html#dependency-scope)
     pub scope: String,
     pub classifier: Option<String>,
+    /// 1 for the project's own dependencies; the nearest path decides the version.
+    /// [Transitive dependencies](https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html#transitive-dependencies)
     pub depth: usize,
+    /// Coordinates of the parent through which the chosen version was reached.
     pub via: Option<String>,
+    /// Local file in the cache; `None` for `pom`-type dependencies, which only contribute their own dependencies.
     pub jar: Option<PathBuf>,
     pub typ: String,
+    /// Name of the repository the file came from (for the lockfile).
     pub repo: Option<String>,
     pub sha256: Option<String>,
 }
@@ -40,7 +48,9 @@ fn excluded(ex: &[(String, String)], d: &Dep) -> bool {
     ex.iter().any(|(g, a)| (g == "*" || *g == d.group) && (a == "*" || *a == d.artifact))
 }
 
-/// Scope of a transitive dependency given its parent's scope; `None` means it is dropped.
+/// Scope of a transitive dependency given its parent's scope; `None` means it is dropped. This is the table in
+/// [Maven's dependency scope](https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html#dependency-scope):
+/// `test`, `provided` and `system` dependencies are never transitive, and a `runtime` parent makes everything `runtime`.
 fn mediate(parent: &str, child: &str) -> Option<&'static str> {
     match (parent, child) {
         (_, "test" | "provided" | "system" | "import") => None,
@@ -224,12 +234,18 @@ fn locate(repos: &Repos, n: &Node, prefetched: Option<Result<Option<Located>>>) 
     }
 }
 
+/// The classifier a dependency is stored under: `test-jar` is the `tests` classifier unless one is given.
+/// [Maven: type `test-jar`](https://maven.apache.org/ref/current/maven-core/artifact-handlers.html)
+fn classifier_of(d: &Dep) -> Option<&str> {
+    d.classifier.as_deref().or(if d.typ == "test-jar" { Some("tests") } else { None })
+}
+
 fn to_resolved(n: &Node, loc: Option<Located>) -> Result<Resolved> {
     let sha256 = loc.as_ref().map(|l| crate::repos::sha256_file(&l.path)).transpose()?;
     Ok(Resolved {
         gav: Gav::new(&n.dep.group, &n.dep.artifact, &n.version),
         scope: n.scope.clone(),
-        classifier: n.dep.classifier.clone(),
+        classifier: classifier_of(&n.dep).map(String::from),
         depth: n.depth,
         via: n.via.clone(),
         repo: loc.as_ref().and_then(|l| l.repo.clone()),
@@ -258,8 +274,7 @@ fn fetch_jar(repos: &Repos, n: &Node) -> Result<Option<Located>> {
     }
     let typ = n.dep.typ.as_str();
     let ext = if matches!(typ, "bundle" | "maven-plugin" | "test-jar") { "jar" } else { typ };
-    let classifier = n.dep.classifier.as_deref().or(if typ == "test-jar" { Some("tests") } else { None });
-    repos.get(&n.dep.group, &n.dep.artifact, &n.version, classifier, ext)
+    repos.get(&n.dep.group, &n.dep.artifact, &n.version, classifier_of(&n.dep), ext)
 }
 
 #[cfg(test)]
@@ -394,5 +409,15 @@ mod tests {
         assert!(t.admit(&junit) && t.admit(&lib) && !t.admit(&junit_via_lib));
         t.widen_scopes();
         assert_eq!(t.chosen[&junit.dep.key()].scope, "test");
+    }
+
+    #[test]
+    fn test_jars_are_stored_under_the_tests_classifier() {
+        let mut d = dep("lib", Some("1"), None);
+        assert_eq!(classifier_of(&d), None);
+        d.typ = "test-jar".into();
+        assert_eq!(classifier_of(&d), Some("tests"));
+        d.classifier = Some("custom".into());
+        assert_eq!(classifier_of(&d), Some("custom"));
     }
 }

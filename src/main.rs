@@ -2,7 +2,7 @@
 //! the steps.
 
 use anyhow::{Context, Result, bail};
-use rayvn::{build, lock, model, repos, resolve, settings, version};
+use rayvn::{build, lock, model, repos, resolve, settings, verify, version};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -24,8 +24,8 @@ fn print_banner() {
     }
 }
 
-const COMMANDS: [&str; 5] = ["lock", "fetch", "resolve", "classpath", "build"];
-const USAGE: &str = "usage: rvn <lock|fetch|resolve|classpath|build> [-f pom.xml] [--locked] [--refresh] [--cold]";
+const COMMANDS: [&str; 7] = ["lock", "fetch", "resolve", "classpath", "build", "test", "verify"];
+const USAGE: &str = "usage: rvn <lock|fetch|resolve|classpath|build|test|verify> [-f pom.xml] [--locked] [--refresh] [--cold]";
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -164,6 +164,24 @@ fn run() -> Result<()> {
                 bail!("packaging '{}' is not supported yet (only jar)", root.packaging);
             }
             build::build(&root, &project_dir, &resolved)?;
+            eprintln!("done in {:?}", t0.elapsed());
+        }
+        "test" | "verify" => {
+            let root = match root {
+                Some(r) => r,
+                None => loader.from_file(&args.pom_path)?,
+            };
+            if root.packaging != "jar" {
+                bail!("packaging '{}' is not supported yet (only jar)", root.packaging);
+            }
+            let main_classes = build::compile_main(&root, &project_dir, &resolved)?;
+            let test_classes = verify::compile_tests(&root, &project_dir, &main_classes, &resolved)?;
+            let run = |phase| verify::run(phase, &root, &project_dir, &test_classes, &main_classes, &resolved, &repos);
+            run(verify::Phase::Unit)?;
+            if args.cmd == "verify" {
+                build::package(&root, &project_dir, &main_classes, &resolved)?;
+                run(verify::Phase::Integration)?;
+            }
             eprintln!("done in {:?}", t0.elapsed());
         }
         _ => unreachable!(),

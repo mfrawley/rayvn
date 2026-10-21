@@ -28,16 +28,25 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-pub fn build(root: &Effective, dir: &Path, resolved: &[Resolved]) -> Result<()> {
-    let target = dir.join("target");
-    let classes = target.join("classes");
+/// Compiles `src/main/java` and copies `src/main/resources` into `target/classes`; returns that directory.
+pub fn compile_main(root: &Effective, dir: &Path, resolved: &[Resolved]) -> Result<PathBuf> {
+    let classes = dir.join("target/classes");
     std::fs::create_dir_all(&classes)?;
-
     compile(root, &dir.join("src/main/java"), &classes, &compile_classpath(resolved))?;
     copy_resources(&dir.join("src/main/resources"), &classes)?;
+    Ok(classes)
+}
 
+pub fn build(root: &Effective, dir: &Path, resolved: &[Resolved]) -> Result<()> {
+    let classes = compile_main(root, dir, resolved)?;
+    package(root, dir, &classes, resolved)
+}
+
+/// Writes the jar from `classes`, shaded as the POM configures, and prints its path.
+pub fn package(root: &Effective, dir: &Path, classes: &Path, resolved: &[Resolved]) -> Result<()> {
+    let target = dir.join("target");
     let jar_path = target.join(format!("{}-{}.jar", root.gav.artifact, root.gav.version));
-    write_jar(&classes, &jar_path)?;
+    write_jar(classes, &jar_path)?;
     eprintln!("  packaged {} ({})", jar_path.display(), size(&jar_path));
     let mut result = jar_path.clone();
     if let Some(cfg) = &root.shade {
@@ -74,7 +83,7 @@ fn compile_classpath(resolved: &[Resolved]) -> Vec<String> {
         .collect()
 }
 
-fn java_sources(dir: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn java_sources(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut sources = vec![];
     walk(dir, &mut sources)?;
     sources.retain(|p| p.extension().is_some_and(|e| e == "java"));
@@ -98,7 +107,7 @@ fn javac_command(classes: &Path, release: Option<&str>, classpath: &[String], so
     cmd
 }
 
-fn compile(root: &Effective, src_dir: &Path, classes: &Path, classpath: &[String]) -> Result<()> {
+pub(crate) fn compile(root: &Effective, src_dir: &Path, classes: &Path, classpath: &[String]) -> Result<()> {
     let sources = java_sources(src_dir)?;
     if sources.is_empty() {
         return Ok(());
@@ -117,7 +126,7 @@ fn compile(root: &Effective, src_dir: &Path, classes: &Path, classpath: &[String
     Ok(())
 }
 
-fn copy_resources(res_dir: &Path, classes: &Path) -> Result<()> {
+pub(crate) fn copy_resources(res_dir: &Path, classes: &Path) -> Result<()> {
     let mut resources = vec![];
     walk(res_dir, &mut resources)?;
     if !resources.is_empty() {
@@ -186,13 +195,13 @@ fn size(p: &Path) -> String {
 }
 
 /// Ant-style match: `*` stays inside a path segment, `**` crosses `/`.
-fn glob(pat: &str, s: &str) -> bool {
+pub(crate) fn glob(pat: &str, s: &str) -> bool {
     fn go(p: &[u8], s: &[u8]) -> bool {
         match p.first() {
             None => s.is_empty(),
             Some(b'*') if p.get(1) == Some(&b'*') => {
                 let rest = p[2..].strip_prefix(b"/").unwrap_or(&p[2..]);
-                (0..=s.len()).any(|i| go(rest, &s[i..]))
+                (0..=s.len()).filter(|&i| i == 0 || s[i - 1] == b'/' || rest.is_empty()).any(|i| go(rest, &s[i..]))
             }
             Some(b'*') => (0..=s.len()).take_while(|&i| i == 0 || s[i - 1] != b'/').any(|i| go(&p[1..], &s[i..])),
             Some(c) => s.first() == Some(c) && go(&p[1..], &s[1..]),
@@ -303,6 +312,9 @@ mod tests {
         assert!(glob("META-INF/*.SF", "META-INF/A.SF"));
         assert!(!glob("META-INF/*.SF", "META-INF/sub/A.SF"));
         assert!(glob("META-INF/**", "META-INF/sub/A.SF"));
+        assert!(glob("**/*Test.java", "a/b/FooTest.java"));
+        assert!(glob("**/*Test.java", "FooTest.java"));
+        assert!(!glob("**/Test*.java", "a/FooTest.java"));
     }
 
     #[test]
