@@ -34,6 +34,7 @@ pub mod secret;
 pub mod settings;
 pub mod testcache;
 pub mod verify;
+pub mod version;
 
 /// The one-line version string: package version, git commit, build time and a name derived from the commit.
 ///

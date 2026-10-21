@@ -4,7 +4,8 @@
 use crate::model::{Effective, Loader, LocalModules};
 use crate::pom::{Dep, Gav, Relocation};
 use crate::repos::{Located, Repos};
-use anyhow::Result;
+use crate::version::Constraint;
+use anyhow::{Context, Result};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -34,7 +35,7 @@ pub struct Resolved {
     pub workspace: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Node {
     dep: Dep,
     version: String,
@@ -187,6 +188,31 @@ fn relocated(mut n: Node, loader: &Loader, managed: &HashMap<String, Dep>) -> Re
 
 const MAX_RELOCATIONS: usize = 10;
 
+type VersionLister<'a> = &'a (dyn Fn(&str, &str) -> Result<Vec<String>> + Sync);
+
+/// Replaces a version range by the highest listed version inside it; any other version is left alone. Maven
+/// does the same per dependency, from the repositories' `maven-metadata.xml`.
+fn pinned(mut n: Node, versions: VersionLister) -> Result<Node> {
+    let name = format!("{}:{}", n.dep.group, n.dep.artifact);
+    let Some(range) = Constraint::parse(&n.version).with_context(|| format!("dependency {name}"))? else { return Ok(n) };
+    if let Some(exact) = range.exact() {
+        n.version = exact.to_string();
+        return Ok(n);
+    }
+    let listed = versions(&n.dep.group, &n.dep.artifact)?;
+    let Some(best) = range.best(&listed) else {
+        anyhow::bail!("no version of {name} satisfies the range {} ({} versions listed in the repositories)", n.version, listed.len());
+    };
+    eprintln!("range {name} {} -> {best}", n.version);
+    n.version = best;
+    Ok(n)
+}
+
+/// A node as the tree should see it: its range (if any) settled, then relocated.
+fn settled(n: Node, loader: &Loader, managed: &HashMap<String, Dep>, versions: VersionLister) -> Result<Node> {
+    relocated(pinned(n, versions)?, loader, managed).and_then(|n| pinned(n, versions))
+}
+
 /// The nodes `parent` pulls in: optional and excluded dependencies are dropped, scopes mediated, versions taken
 /// from the root's dependencyManagement first.
 fn child_nodes(parent: &Node, deps: &[Dep], managed: &HashMap<String, Dep>) -> Vec<Node> {
@@ -209,7 +235,11 @@ fn child_nodes(parent: &Node, deps: &[Dep], managed: &HashMap<String, Dep>) -> V
 /// Nearest-wins resolution, level by level; each level's POMs are fetched in parallel.
 pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: bool) -> Result<Vec<Resolved>> {
     let mut tree = Tree::default();
-    let roots = root_nodes(&root.deps, include_test)?.into_par_iter().map(|n| relocated(n, loader, &root.managed)).collect::<Result<Vec<_>>>()?;
+    let lister = |g: &str, a: &str| {
+        repos.clear_progress();
+        repos.versions(g, a)
+    };
+    let roots = root_nodes(&root.deps, include_test)?.into_par_iter().map(|n| settled(n, loader, &root.managed, &lister)).collect::<Result<Vec<_>>>()?;
     let mut frontier: Vec<Node> = roots.into_iter().filter(|n| tree.admit(n)).collect();
 
     // Jar downloads start as soon as a node is chosen, overlapping the POM walk; results are kept so the pass below reports failures and the origin repo.
@@ -222,7 +252,7 @@ pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: b
                 .map(|n| {
                     let kids = child_nodes(n, &loader.load(&Gav::new(&n.dep.group, &n.dep.artifact, &n.version))?.deps, &root.managed);
                     // A candidate that has already lost mediation is never loaded, so it cannot fail for its POM's sake.
-                    kids.into_par_iter().map(|k| if tree.chosen.contains_key(&k.dep.key()) { Ok(k) } else { relocated(k, loader, &root.managed) }).collect::<Result<Vec<_>>>()
+                    kids.into_par_iter().map(|k| if tree.chosen.contains_key(&k.dep.key()) { Ok(k) } else { settled(k, loader, &root.managed, &lister) }).collect::<Result<Vec<_>>>()
                 })
                 .collect();
 
@@ -343,6 +373,40 @@ mod tests {
 
     fn artifacts(nodes: &[Node]) -> Vec<&str> {
         nodes.iter().map(|n| n.dep.artifact.as_str()).collect()
+    }
+
+    fn lister(listed: &'static [&'static str]) -> impl Fn(&str, &str) -> Result<Vec<String>> + Sync {
+        move |_, _| Ok(listed.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn a_range_becomes_the_highest_version_inside_it() {
+        let n = pinned(node(dep("a", Some("[1.0,2.0)"), None), None), &lister(&["0.9", "1.0", "1.9", "2.0"])).unwrap();
+        assert_eq!(n.version, "1.9");
+    }
+
+    #[test]
+    fn an_exact_range_needs_no_listing() {
+        let never = |_: &str, _: &str| -> Result<Vec<String>> { panic!("[x] needs no listing") };
+        assert_eq!(pinned(node(dep("a", Some("[2.2.273]"), None), None), &never).unwrap().version, "2.2.273");
+    }
+
+    #[test]
+    fn an_ordinary_version_is_not_looked_up() {
+        let never = |_: &str, _: &str| -> Result<Vec<String>> { panic!("a soft version needs no listing") };
+        assert_eq!(pinned(node(dep("a", Some("1.2.3"), None), None), &never).unwrap().version, "1.2.3");
+    }
+
+    #[test]
+    fn a_range_nothing_satisfies_names_the_dependency_and_the_range() {
+        let e = pinned(node(dep("a", Some("[3.0,4.0)"), None), None), &lister(&["1.0", "2.0"])).unwrap_err().to_string();
+        assert!(e.contains("g:a") && e.contains("[3.0,4.0)") && e.contains("2 versions"), "{e}");
+    }
+
+    #[test]
+    fn a_malformed_range_names_the_dependency() {
+        let e = format!("{:#}", pinned(node(dep("a", Some("[1.0,2.0"), None), None), &lister(&[])).unwrap_err());
+        assert!(e.contains("g:a") && e.contains("[1.0,2.0"), "{e}");
     }
 
     #[test]

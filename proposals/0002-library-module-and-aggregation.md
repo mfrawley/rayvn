@@ -90,7 +90,7 @@ Jar diff against Maven (same commit, all 23 modules, 26 jars; `mvn package` 2:29
 
 What is left is not rayvn: Maven writes empty files as four NUL bytes; and one module resolved a different `analysis-0.4.7.jar` because the copy in `~/.m2` does not match its own `.sha1`. Gradle (`reproducibleFileOrder`, `preserveFileTimestamps = false`) and Bazel (fixed timestamps, sorted entries by default) make jars reproducible; rayvn now does too: every entry has the zip epoch as its time and mode 0644, entries are sorted, and `target/classes` is emptied before each compile so a deleted source or resource cannot linger. Two builds of all 23 modules, seconds apart, give identical jars.
 
-Not supported, and the reason a module was left out: version ranges (`[10.0.0,11.0.0)`, one module), and the `protoc` and `exec` plugins (not run; the POM of `routing-map-conversion` has its protoc plugin commented out, so it needs none). Left out on purpose: `archive`, which holds legacy and GUI code.
+Not supported, and the reason a module was left out: the `protoc` and `exec` plugins (not run; the POM of `routing-map-conversion` has its protoc plugin commented out, so it needs none). Left out on purpose: `archive`, which holds legacy and GUI code.
 
 ### Versions across modules
 
@@ -109,6 +109,10 @@ allow = ["org.matsim:matsim"]
 ### Tests across the workspace
 
 `rvn test` at the root of the transport-modeling workspace runs the 3 modules that have tests (matsim-moia 15, routing-map-conversion 4, 21 modules have none) and reports a per-module table; a second run is served from the test cache (28.8 s total, mostly resolving and compiling). Fixed on the way: the test JVM runs in the module directory, so a relative classpath from a root-level `-f pom.xml` failed with `ClassNotFoundException`; entries are now absolute.
+
+### Version ranges
+
+`aws-infra` (constructs `[10.0.0,11.0.0)`) now locks: 10.8.1, the highest 10.x listed, and 71 artifacts. It stays in the `exclude` list because it also needs the `exec` plugin, which rayvn does not run. See `docs/version-ranges.md`.
 
 ### Bumping a dependency across modules (0-day response)
 

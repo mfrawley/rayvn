@@ -56,5 +56,5 @@ Environment: `RAYVN_LOCAL_REPO` (cache location), `RAYVN_RO_REPO` (read-only cac
 ## Where things are
 
 - `proposals/`: design decisions, numbered, not rewritten after the fact.
-- `docs/`: user documentation (`routing.md`, `credentials.md`, `testing.md`, `workspace.md`).
+- `docs/`: user documentation (`routing.md`, `credentials.md`, `testing.md`, `workspace.md`, `version-ranges.md`).
 - API docs: `cargo doc --no-deps --open`. Examples in them run under `cargo test`.

@@ -325,6 +325,34 @@ impl Repos {
         }
     }
 
+    /// Every version of `group:artifact` the candidate repositories list in their `maven-metadata.xml`, merged.
+    /// A listing younger than `snapshot_ttl_hours` is reused without a request (`--refresh` always asks), so a
+    /// range floats only when you re-lock. Repositories without metadata for the artifact are skipped.
+    pub fn versions(&self, group: &str, artifact: &str) -> Result<Vec<String>> {
+        let dir = format!("{}/{artifact}", group.replace('.', "/"));
+        let mut all: Vec<String> = vec![];
+        for r in &self.candidates(group) {
+            if self.is_dead(&r.id) {
+                continue;
+            }
+            let meta = self.local.join(&dir).join(format!("maven-metadata-{}.xml", r.id));
+            if !(self.listing_is_fresh(&meta) || self.fetch_metadata(r, &dir, &meta)?) {
+                continue;
+            }
+            for v in listed_versions(&std::fs::read_to_string(&meta)?) {
+                if !all.contains(&v) {
+                    all.push(v);
+                }
+            }
+        }
+        Ok(all)
+    }
+
+    fn listing_is_fresh(&self, meta: &Path) -> bool {
+        let age = std::fs::metadata(meta).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+        !self.refresh && age.is_some_and(|a| a.as_secs() < self.snapshot_ttl)
+    }
+
     /// A SNAPSHOT that rayvn downloaded earlier is rechecked once its stamp is older than `snapshot_ttl_hours`
     /// (always with `--refresh`). Files rayvn didn't download, such as `mvn install` output, are left alone.
     fn revalidate_snapshot(&self, group: &str, artifact: &str, version: &str, classifier: Option<&str>, ext: &str, local: &Path) -> Result<Option<Located>> {
@@ -572,6 +600,15 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// The `<versions>` of a `maven-metadata.xml`, in the order listed; empty if the file is not valid metadata.
+fn listed_versions(xml: &str) -> Vec<String> {
+    let Ok(doc) = roxmltree::Document::parse(xml) else { return vec![] };
+    doc.descendants()
+        .find(|n| n.has_tag_name("versions"))
+        .map(|vs| vs.children().filter(|c| c.has_tag_name("version")).filter_map(|c| c.text()).map(|t| t.trim().to_string()).collect())
+        .unwrap_or_default()
+}
+
 /// The timestamped version of a SNAPSHOT file listed in a repository's `maven-metadata.xml`.
 fn snapshot_value(xml: &str, version: &str, classifier: Option<&str>, ext: &str) -> Option<String> {
     let doc = roxmltree::Document::parse(xml).ok()?;
@@ -753,6 +790,14 @@ fn human(b: u64) -> String {
 mod tests {
     fn temp_file(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("rvn-test-{}-{name}", std::process::id())).join("out.jar")
+    }
+
+    #[test]
+    fn versions_are_read_from_maven_metadata() {
+        let xml = "<metadata><groupId>g</groupId><versioning><latest>2</latest><versions><version>1.0</version><version> 1.5 </version><version>2</version></versions></versioning></metadata>";
+        assert_eq!(listed_versions(xml), ["1.0", "1.5", "2"]);
+        assert!(listed_versions("<metadata/>").is_empty());
+        assert!(listed_versions("not xml").is_empty());
     }
 
     #[test]
