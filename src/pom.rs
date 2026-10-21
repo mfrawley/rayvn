@@ -60,6 +60,15 @@ impl Dep {
     }
 }
 
+/// `<distributionManagement><relocation>`: the artifact moved. Fields left out keep the old value.
+/// [Guide to relocation](https://maven.apache.org/guides/mini/guide-relocation.html)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Relocation {
+    pub group: Option<String>,
+    pub artifact: Option<String>,
+    pub version: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct RepoDecl {
     pub id: String,
@@ -78,6 +87,7 @@ pub struct RawPom {
     pub deps: Vec<Dep>,
     pub repos: Vec<RepoDecl>,
     pub modules: Vec<String>,
+    pub relocation: Option<Relocation>,
     profiles: Vec<Profile>,
     pub shade: Option<ShadeCfg>,
     pub surefire: Option<TestCfg>,
@@ -304,9 +314,10 @@ fn explicit_match(a: &Activation) -> bool {
     a.jdk.as_deref().is_none_or(jdk_matches) && a.property.as_ref().is_none_or(property_matches) && (a.os.is_empty() || os_matches(&a.os))
 }
 
-fn property_matches((name, _): &(String, Option<String>)) -> bool {
-    // rayvn has no -D yet, so no property is ever set: only a negated name can hold.
-    name.starts_with('!')
+/// rayvn has no `-D` yet, so no property is ever set: `!name` holds, and so does `name` with a negated value
+/// (`!true`, "anything but true", which an unset property is). A plain name or value does not.
+fn property_matches((name, value): &(String, Option<String>)) -> bool {
+    name.starts_with('!') || value.as_deref().is_some_and(|v| v.starts_with('!'))
 }
 
 fn os_matches(os: &[(String, String)]) -> bool {
@@ -436,9 +447,48 @@ fn parse_raw(xml: &str) -> Result<RawPom> {
         deps: parse_deps(child(root, "dependencies")),
         repos,
         modules,
+        relocation: child(root, "distributionManagement")
+            .and_then(|d| child(d, "relocation"))
+            .map(|r| Relocation { group: text(r, "groupId"), artifact: text(r, "artifactId"), version: text(r, "version") }),
         shade: parse_shade(root),
         surefire: parse_tests(root, "maven-surefire-plugin"),
         failsafe: parse_tests(root, "maven-failsafe-plugin"),
         profiles: child(root, "profiles").map(|p| p.children().filter(|c| c.is_element()).map(parse_profile).collect()).unwrap_or_default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn javafx_style(os_name: &str, platform: &str) -> String {
+        format!(
+            "<project><artifactId>fx</artifactId><profiles><profile><activation><os><name>{os_name}</name></os>\
+             <property><name>javafx.monocle</name><value>!true</value></property></activation>\
+             <properties><javafx.platform>{platform}</javafx.platform></properties></profile></profiles></project>"
+        )
+    }
+
+    #[test]
+    fn an_os_profile_with_a_not_true_property_applies_because_the_property_is_unset() {
+        let here = if std::env::consts::OS == "macos" { "mac os x" } else if std::env::consts::OS == "linux" { "linux" } else { "windows" };
+        assert_eq!(parse(&javafx_style(here, "here")).unwrap().props.get("javafx.platform").map(String::as_str), Some("here"));
+        assert!(parse(&javafx_style("plan9", "there")).unwrap().props.is_empty());
+    }
+
+    #[test]
+    fn a_property_that_must_be_set_never_holds_without_dash_d() {
+        for (name, value) in [("x", None), ("x", Some("true")), ("!x", None), ("x", Some("!true"))] {
+            let held = property_matches(&(name.to_string(), value.map(String::from)));
+            assert_eq!(held, name.starts_with('!') || value.is_some_and(|v| v.starts_with('!')), "{name} {value:?}");
+        }
+    }
+
+    #[test]
+    fn a_relocation_is_read_from_distribution_management() {
+        let moved = parse("<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version><distributionManagement><relocation><groupId>new</groupId></relocation></distributionManagement></project>").unwrap();
+        assert_eq!(moved.relocation, Some(Relocation { group: Some("new".into()), ..Default::default() }));
+        let plain = parse("<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version></project>").unwrap();
+        assert_eq!(plain.relocation, None);
+    }
 }

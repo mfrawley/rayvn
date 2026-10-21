@@ -2,7 +2,7 @@
 //! mediation, exclusions and optional dependencies. POMs at each depth are loaded in parallel.
 
 use crate::model::{Effective, Loader, LocalModules};
-use crate::pom::{Dep, Gav};
+use crate::pom::{Dep, Gav, Relocation};
 use crate::repos::{Located, Repos};
 use anyhow::Result;
 use rayon::prelude::*;
@@ -162,6 +162,31 @@ fn root_nodes(deps: &[Dep], include_test: bool) -> Result<Vec<Node>> {
     Ok(nodes)
 }
 
+/// Moves `n` to where its POM says the artifact now lives. A version the root manages for the new coordinates wins,
+/// as for any dependency. Returns false when `r` changes nothing.
+fn apply_relocation(n: &mut Node, r: &Relocation, managed: &HashMap<String, Dep>) -> bool {
+    let before = (n.dep.group.clone(), n.dep.artifact.clone(), n.version.clone());
+    n.dep.group = r.group.clone().unwrap_or_else(|| n.dep.group.clone());
+    n.dep.artifact = r.artifact.clone().unwrap_or_else(|| n.dep.artifact.clone());
+    n.version = managed.get(&n.dep.key()).and_then(|m| m.version.clone()).or_else(|| r.version.clone()).unwrap_or_else(|| n.version.clone());
+    before != (n.dep.group.clone(), n.dep.artifact.clone(), n.version.clone())
+}
+
+/// Follows `<relocation>` from the node's POM until the artifact is where it says it is, as Maven does.
+fn relocated(mut n: Node, loader: &Loader, managed: &HashMap<String, Dep>) -> Result<Node> {
+    for _ in 0..MAX_RELOCATIONS {
+        let from = Gav::new(&n.dep.group, &n.dep.artifact, &n.version);
+        let Some(r) = loader.load(&from)?.relocation.clone() else { return Ok(n) };
+        if !apply_relocation(&mut n, &r, managed) {
+            return Ok(n);
+        }
+        eprintln!("warning: {from} has been relocated to {}", Gav::new(&n.dep.group, &n.dep.artifact, &n.version));
+    }
+    anyhow::bail!("{}:{} is relocated more than {MAX_RELOCATIONS} times; is it a loop?", n.dep.group, n.dep.artifact)
+}
+
+const MAX_RELOCATIONS: usize = 10;
+
 /// The nodes `parent` pulls in: optional and excluded dependencies are dropped, scopes mediated, versions taken
 /// from the root's dependencyManagement first.
 fn child_nodes(parent: &Node, deps: &[Dep], managed: &HashMap<String, Dep>) -> Vec<Node> {
@@ -184,7 +209,8 @@ fn child_nodes(parent: &Node, deps: &[Dep], managed: &HashMap<String, Dep>) -> V
 /// Nearest-wins resolution, level by level; each level's POMs are fetched in parallel.
 pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: bool) -> Result<Vec<Resolved>> {
     let mut tree = Tree::default();
-    let mut frontier: Vec<Node> = root_nodes(&root.deps, include_test)?.into_iter().filter(|n| tree.admit(n)).collect();
+    let roots = root_nodes(&root.deps, include_test)?.into_par_iter().map(|n| relocated(n, loader, &root.managed)).collect::<Result<Vec<_>>>()?;
+    let mut frontier: Vec<Node> = roots.into_iter().filter(|n| tree.admit(n)).collect();
 
     // Jar downloads start as soon as a node is chosen, overlapping the POM walk; results are kept so the pass below reports failures and the origin repo.
     let fetched: Fetched = Mutex::new(HashMap::new());
@@ -193,7 +219,11 @@ pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: b
         while !frontier.is_empty() {
             let expanded: Vec<Result<Vec<Node>>> = frontier
                 .par_iter()
-                .map(|n| Ok(child_nodes(n, &loader.load(&Gav::new(&n.dep.group, &n.dep.artifact, &n.version))?.deps, &root.managed)))
+                .map(|n| {
+                    let kids = child_nodes(n, &loader.load(&Gav::new(&n.dep.group, &n.dep.artifact, &n.version))?.deps, &root.managed);
+                    // A candidate that has already lost mediation is never loaded, so it cannot fail for its POM's sake.
+                    kids.into_par_iter().map(|k| if tree.chosen.contains_key(&k.dep.key()) { Ok(k) } else { relocated(k, loader, &root.managed) }).collect::<Result<Vec<_>>>()
+                })
                 .collect();
 
             let mut next = vec![];
@@ -331,6 +361,27 @@ mod tests {
         assert_eq!(artifacts(&root_nodes(&deps, false).unwrap()), ["a"]);
         assert_eq!(artifacts(&root_nodes(&deps, true).unwrap()), ["a", "t"]);
         assert!(root_nodes(&[dep("v", None, None)], true).is_err());
+    }
+
+    #[test]
+    fn a_relocation_moves_only_the_fields_it_names() {
+        let mut n = node(dep("old", Some("1"), None), None);
+        let r = Relocation { group: Some("new-g".into()), ..Default::default() };
+        assert!(apply_relocation(&mut n, &r, &HashMap::new()));
+        assert_eq!((n.dep.group.as_str(), n.dep.artifact.as_str(), n.version.as_str()), ("new-g", "old", "1"));
+        assert!(!apply_relocation(&mut n, &r, &HashMap::new()), "already there: nothing changes, so a loop ends");
+        let r = Relocation { artifact: Some("newer".into()), version: Some("2".into()), ..Default::default() };
+        assert!(apply_relocation(&mut n, &r, &HashMap::new()));
+        assert_eq!((n.dep.artifact.as_str(), n.version.as_str()), ("newer", "2"));
+    }
+
+    #[test]
+    fn a_version_managed_for_the_new_coordinates_beats_the_relocation_version() {
+        let mut n = node(dep("old", Some("1"), None), None);
+        let r = Relocation { artifact: Some("new".into()), version: Some("2".into()), ..Default::default() };
+        let pinned = dep("new", Some("9"), None);
+        apply_relocation(&mut n, &r, &HashMap::from([(pinned.key(), pinned)]));
+        assert_eq!(n.version, "9");
     }
 
     #[test]

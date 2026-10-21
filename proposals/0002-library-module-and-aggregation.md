@@ -73,6 +73,17 @@ One `rayvn.lock` per module, as now; no root lockfile until we need one.
 
 Steps 1 to 3 are done (`src/reactor.rs`, `docs/workspace.md`); step 4 is not: modules build one after another. A sibling is matched on exact coordinates and read from `target/classes`; the lock records it as `workspace = true`. Checked on a two-module demo, including `fetch`, `--locked` and a shaded app containing its sibling, and on matsim-moia (single module, unchanged).
 
+### Results on a real workspace (2026-10-21)
+
+A whole-checkout build from the root POM of a 40-POM repository: 23 modules built, `rvn build` 35.6 s (warm cache) after a 4 min 44 s cold `rvn lock`, exit 0. Getting there needed four changes, each found by the run:
+
+- `[workspace] exclude = [...]` in `rayvn.toml`: the checkout has an `archive` aggregator and an infrastructure module (version range, `exec` plugin) that are not part of this build. Documented in `docs/workspace.md`.
+- Profile activation `<property><name>x</name><value>!true</value></property>` now holds when `x` is unset. JavaFX picks its platform jar this way (`${javafx.platform}`), so any JavaFX dependency failed before.
+- `<relocation>` is followed (`org.lz4:lz4-java:1.8.1` moved to `at.yawk.lz4`), with a warning. Only a node that wins mediation is loaded, so a losing candidate can never fail on its POM.
+- Shade `<filters>` with `*:*` matched nothing (the pattern was turned into a glob that cannot cross `:`), leaving `.SF`/`.RSA` signature files in fat jars.
+
+Not supported, and the reason a module was left out: version ranges (`[10.0.0,11.0.0)`, one module), and the `protoc` and `exec` plugins (not run; the POM of `routing-map-conversion` has its protoc plugin commented out, so it needs none). Left out on purpose: `archive`, which holds legacy and GUI code.
+
 ### Versions across modules
 
 Per-module resolution means modules may differ; they conflict only where both reach one classpath, and the JVM's flat namespace allows one version there. Planned, opt-in:

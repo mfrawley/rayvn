@@ -214,9 +214,20 @@ pub struct Config {
     /// `[test]`: caching and sharding of `rvn test` / `rvn verify`.
     #[serde(default)]
     pub test: TestSettings,
+    /// `[workspace]`: which modules a multi-module build includes.
+    #[serde(default)]
+    pub workspace: WorkspaceSettings,
     /// Extra cache directories that are read but never written (also `RAYVN_RO_REPO`, `:`-separated).
     #[serde(default)]
     pub read_only_repos: Vec<String>,
+}
+
+/// `[workspace]` in `rayvn.toml`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct WorkspaceSettings {
+    /// Ant-style globs, relative to the root POM's directory, of modules to leave out (with everything below them).
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 /// `[test]` in `rayvn.toml`. Every field is optional; a project file overrides the user file.
@@ -342,6 +353,7 @@ pub fn load_config(project_dir: &Path) -> Result<(Config, Vec<PathBuf>)> {
             cfg.miss_ttl_hours = cfg.miss_ttl_hours.or(c.miss_ttl_hours);
             cfg.snapshot_ttl_hours = cfg.snapshot_ttl_hours.or(c.snapshot_ttl_hours);
             cfg.test = std::mem::take(&mut cfg.test).overridden_by(c.test);
+            cfg.workspace.exclude.extend(c.workspace.exclude);
             cfg.read_only_repos.extend(c.read_only_repos);
             cfg.repo.extend(c.repo);
             cfg.allow_http_auth.extend(c.allow_http_auth);
@@ -362,6 +374,13 @@ mod tests {
         let merged = user.overridden_by(project);
         assert_eq!((merged.cache, merged.cache_integration, merged.shards), (Some(false), Some(true), Some(2)));
         assert_eq!(merged.inputs, ["a", "b"]);
+    }
+
+    #[test]
+    fn workspace_exclude_parses_from_toml() {
+        let c: Config = toml::from_str("[workspace]\nexclude = [\"archive\", \"projects/year_2024/*\"]\n").unwrap();
+        assert_eq!(c.workspace.exclude, ["archive", "projects/year_2024/*"]);
+        assert!(Config::default().workspace.exclude.is_empty());
     }
 
     #[test]

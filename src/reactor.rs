@@ -58,14 +58,29 @@ pub struct Found {
 }
 
 /// The project at `root_pom` followed by its modules, recursively, in declaration order (depth first), read
-/// without touching the network. Fails on a module that lists an ancestor.
-pub fn scan(root_pom: &Path) -> Result<Vec<Found>> {
-    let mut out = vec![];
-    scan_into(root_pom, &mut out, &mut vec![])?;
-    Ok(out)
+/// without touching the network. A module whose directory (relative to the root) matches an `exclude` glob is
+/// left out with everything below it. Fails on a module that lists an ancestor.
+pub fn scan(root_pom: &Path, exclude: &[String]) -> Result<Scan> {
+    let mut scan = Scan { found: vec![], unused: exclude.to_vec() };
+    let root = root_pom.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    scan_into(root_pom, root, exclude, &mut scan, &mut vec![])?;
+    Ok(scan)
 }
 
-fn scan_into(pom_path: &Path, out: &mut Vec<Found>, ancestors: &mut Vec<PathBuf>) -> Result<()> {
+/// What [`scan`] found.
+#[derive(Debug)]
+pub struct Scan {
+    pub found: Vec<Found>,
+    /// `exclude` patterns that matched no module: usually a typo, so the caller should say so.
+    pub unused: Vec<String>,
+}
+
+/// `dir` relative to `root`, with `/` separators.
+fn relative(root: &Path, dir: &Path) -> String {
+    dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().replace('\\', "/")
+}
+
+fn scan_into(pom_path: &Path, root: &Path, exclude: &[String], scan: &mut Scan, ancestors: &mut Vec<PathBuf>) -> Result<()> {
     let id = std::fs::canonicalize(pom_path).with_context(|| format!("module pom not found: {}", pom_path.display()))?;
     if ancestors.contains(&id) {
         bail!("{} lists itself as a module, directly or through its modules", pom_path.display());
@@ -73,10 +88,17 @@ fn scan_into(pom_path: &Path, out: &mut Vec<Found>, ancestors: &mut Vec<PathBuf>
     let raw = pom::parse(&std::fs::read_to_string(pom_path).with_context(|| format!("reading {}", pom_path.display()))?).with_context(|| pom_path.display().to_string())?;
     let dir = pom_path.parent().filter(|p| !p.as_os_str().is_empty()).map_or_else(|| PathBuf::from("."), PathBuf::from);
     let modules: Vec<String> = raw.modules.into_iter().filter(|m| !m.is_empty()).collect();
-    out.push(Found { pom_path: pom_path.to_path_buf(), dir: dir.clone(), modules: modules.clone(), poms: model::local_poms(pom_path)? });
+    scan.found.push(Found { pom_path: pom_path.to_path_buf(), dir: dir.clone(), modules: modules.clone(), poms: model::local_poms(pom_path)? });
     ancestors.push(id);
     for m in &modules {
-        scan_into(&module_pom_path(&dir, m), out, ancestors)?;
+        let child = module_pom_path(&dir, m);
+        let rel = relative(root, child.parent().unwrap_or(&dir));
+        let hit = |g: &String| crate::build::glob(g.trim_end_matches('/'), &rel);
+        let skipped = exclude.iter().any(hit);
+        scan.unused.retain(|g| !hit(g));
+        if !skipped {
+            scan_into(&child, root, exclude, scan, ancestors)?;
+        }
     }
     ancestors.pop();
     Ok(())
@@ -251,6 +273,7 @@ mod tests {
                 shade: None,
                 surefire: None,
                 failsafe: None,
+                relocation: None,
             },
         }
     }
@@ -368,15 +391,29 @@ mod tests {
     #[test]
     fn scan_follows_modules_depth_first_through_nested_aggregators() {
         let d = tree("nested", &[("pom.xml", &pom("root", &["a", "b"])), ("a/pom.xml", &pom("a", &["a1"])), ("a/a1/pom.xml", &pom("a1", &[])), ("b/pom.xml", &pom("b", &[]))]);
-        let dirs: Vec<PathBuf> = scan(&d.join("pom.xml")).unwrap().into_iter().map(|f| f.dir.strip_prefix(&d).unwrap().to_path_buf()).collect();
+        let dirs: Vec<PathBuf> = scan(&d.join("pom.xml"), &[]).unwrap().found.into_iter().map(|f| f.dir.strip_prefix(&d).unwrap().to_path_buf()).collect();
         assert_eq!(dirs, ["", "a", "a/a1", "b"].map(PathBuf::from));
     }
 
     #[test]
     fn scan_rejects_a_module_that_lists_an_ancestor_and_a_missing_module() {
         let d = tree("loop", &[("pom.xml", &pom("root", &["a"])), ("a/pom.xml", &pom("a", &[".."]))]);
-        assert!(scan(&d.join("pom.xml")).unwrap_err().to_string().contains("lists itself"));
+        assert!(scan(&d.join("pom.xml"), &[]).unwrap_err().to_string().contains("lists itself"));
         let d = tree("missing", &[("pom.xml", &pom("root", &["gone"]))]);
-        assert!(scan(&d.join("pom.xml")).unwrap_err().to_string().contains("module pom not found"));
+        assert!(scan(&d.join("pom.xml"), &[]).unwrap_err().to_string().contains("module pom not found"));
+    }
+
+    #[test]
+    fn excluded_modules_are_skipped_with_everything_below_and_unmatched_patterns_are_reported() {
+        let d = tree("exclude", &[("pom.xml", &pom("root", &["a", "b"])), ("a/pom.xml", &pom("a", &["a1"])), ("a/a1/pom.xml", &pom("a1", &[])), ("b/pom.xml", &pom("b", &[]))]);
+        let s = scan(&d.join("pom.xml"), &["a".into(), "typo".into()]).unwrap();
+        let dirs: Vec<PathBuf> = s.found.iter().map(|f| f.dir.strip_prefix(&d).unwrap().to_path_buf()).collect();
+        assert_eq!(dirs, ["", "b"].map(PathBuf::from), "a1 goes with a");
+        assert_eq!(s.unused, ["typo"]);
+        let nested = scan(&d.join("pom.xml"), &["a/a1/".into()]).unwrap();
+        assert_eq!(nested.found.len(), 3, "only the nested module is gone; a trailing slash is allowed");
+        assert!(nested.unused.is_empty());
+        let wild = scan(&d.join("pom.xml"), &["**/a1".into()]).unwrap();
+        assert_eq!(wild.found.len(), 3);
     }
 }

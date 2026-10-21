@@ -21,6 +21,19 @@ A POM that lists `<modules>` makes a workspace. Run `rvn` at the root, or with `
 - **One lock per module**, `<module>/rayvn.lock`, no root lock. A sibling is recorded as `workspace = true` with no checksum. A module's lock goes stale when the POMs of the module, its parents on disk, or any module it depends on (directly or not) change; a change elsewhere leaves it alone.
 - **The test cache** hashes a sibling by its class tree, so editing `core` re-runs `app`'s tests.
 
+## Leaving modules out
+
+A checkout often has sub-projects that should not be part of the build: archived code, infrastructure that needs other tooling, experiments. List them in `rayvn.toml` next to the root POM:
+
+```toml
+[workspace]
+exclude = ["archive", "projects/year_2024/*", "**/scratch"]
+```
+
+Patterns are ant-style globs (`*` within a directory name, `**` across them) on the module's directory relative to the root POM. An excluded module is dropped with everything below it, and its POM is never read. A pattern that matches no module draws a warning, since it is usually a typo. `exclude` entries from `~/.rayvn/config.toml` and `rayvn.toml` add up. The Maven source POMs stay untouched, so `mvn` still builds everything.
+
+Gradle does this in `settings.gradle` by leaving out an `include`; Bazel keeps a package out of a build with `.bazelignore` or `--deleted_packages`.
+
 ## Versions across modules
 
 Each module resolves on its own, so two modules may use different versions of a library; nothing conflicts until both reach one classpath, where Maven's nearest-wins applies as always. The JVM has one version per class on a classpath, so rayvn does not try to load two (Nix-style isolation would need relocation or separate classloaders).

@@ -205,7 +205,11 @@ fn run() -> Result<()> {
     }
     let (config, _) = settings::load_config(&project_dir)?;
 
-    let found = reactor::scan(&args.pom_path)?;
+    let scan = reactor::scan(&args.pom_path, &config.workspace.exclude)?;
+    for g in &scan.unused {
+        eprintln!("warning: [workspace] exclude '{g}' matches no module");
+    }
+    let found = scan.found;
     let declared: Vec<_> = found.iter().flat_map(|f| f.poms.repos.iter().cloned()).collect();
     let repos = repos::Repos::new(&declared, &settings, &config, args.refresh, args.cold)?;
     let mut loader = model::Loader::new(&repos);

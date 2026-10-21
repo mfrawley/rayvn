@@ -36,6 +36,8 @@ pub struct Effective {
     pub surefire: Option<pom::TestCfg>,
     /// `maven-failsafe-plugin` (integration tests) configuration, likewise inherited.
     pub failsafe: Option<pom::TestCfg>,
+    /// The POM's own `<relocation>`: the artifact now lives elsewhere and dependents must use that instead.
+    pub relocation: Option<pom::Relocation>,
 }
 
 /// A module of the current workspace: its model and where its build output goes.
@@ -167,7 +169,7 @@ impl<'a> Loader<'a> {
         let shade = raw.shade.or_else(|| parent.as_ref().and_then(|p| p.shade.clone()));
         let surefire = raw.surefire.or_else(|| parent.as_ref().and_then(|p| p.surefire.clone()));
         let failsafe = raw.failsafe.or_else(|| parent.as_ref().and_then(|p| p.failsafe.clone()));
-        Ok(Effective { gav, packaging: raw.packaging, props, managed, deps, repos, shade, surefire, failsafe })
+        Ok(Effective { gav, packaging: raw.packaging, props, managed, deps, repos, shade, surefire, failsafe, relocation: raw.relocation })
     }
 
     /// The parent's dependencyManagement plus this POM's own; imported BOMs fill in only what is not managed yet.
@@ -358,6 +360,7 @@ mod tests {
             shade: None,
             surefire: None,
             failsafe: None,
+            relocation: None,
         }
     }
 

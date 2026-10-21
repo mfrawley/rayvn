@@ -327,6 +327,7 @@ mod tests {
             shade: None,
             surefire: None,
             failsafe: None,
+            relocation: None,
         };
         assert!(skipped(&TestCfg { skips: vec!["${skipITs}".into()], ..Default::default() }, &root));
         assert!(!skipped(&TestCfg { skips: vec!["${unset}".into(), "false".into()], ..Default::default() }, &root));
@@ -351,6 +352,7 @@ mod tests {
             shade: None,
             surefire: None,
             failsafe: None,
+            relocation: None,
         }
     }
 
