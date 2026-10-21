@@ -271,6 +271,7 @@ mod tests {
                 deps: deps.iter().map(dep).collect(),
                 repos: vec![],
                 shade: None,
+                compiler: None,
                 surefire: None,
                 failsafe: None,
                 relocation: None,

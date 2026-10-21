@@ -99,16 +99,42 @@ pub(crate) fn java_sources(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(sources)
 }
 
-fn compiler_release(props: &BTreeMap<String, String>) -> Option<String> {
-    props.get("maven.compiler.release").or_else(|| props.get("maven.compiler.target")).cloned()
+/// The Java level, as Maven's compiler plugin decides it: plugin `<configuration>` beats the
+/// `maven.compiler.*` properties, and `release` beats `source`/`target`. An unresolved `${...}` is unset.
+#[derive(Debug, Default, PartialEq)]
+struct JavaLevel {
+    release: Option<String>,
+    source: Option<String>,
+    target: Option<String>,
 }
 
-fn javac_command(classes: &Path, release: Option<&str>, classpath: &[String], sources: &[PathBuf]) -> Command {
-    let mut cmd = Command::new("javac");
-    cmd.arg("-d").arg(classes).args(["-encoding", "UTF-8", "-proc:none", "-g"]);
-    if let Some(r) = release {
-        cmd.arg("--release").arg(r);
+impl JavaLevel {
+    fn of(root: &Effective) -> Self {
+        let cfg = root.compiler.clone().unwrap_or_default();
+        let pick = |plugin: Option<String>, prop: &str| {
+            plugin
+                .or_else(|| root.props.get(prop).cloned())
+                .map(|v| crate::model::interpolate(&v, &root.props))
+                .filter(|v| !v.contains("${"))
+        };
+        JavaLevel {
+            release: pick(cfg.release, "maven.compiler.release"),
+            source: pick(cfg.source, "maven.compiler.source"),
+            target: pick(cfg.target, "maven.compiler.target"),
+        }
     }
+
+    fn args(&self) -> Vec<String> {
+        match (&self.release, &self.source, &self.target) {
+            (Some(r), _, _) => vec!["--release".into(), r.clone()],
+            (None, s, t) => s.iter().flat_map(|s| ["-source".to_string(), s.clone()]).chain(t.iter().flat_map(|t| ["-target".to_string(), t.clone()])).collect(),
+        }
+    }
+}
+
+fn javac_command(classes: &Path, level: &JavaLevel, classpath: &[String], sources: &[PathBuf]) -> Command {
+    let mut cmd = Command::new("javac");
+    cmd.arg("-d").arg(classes).args(["-encoding", "UTF-8", "-proc:none", "-g"]).args(level.args());
     if !classpath.is_empty() {
         cmd.arg("-cp").arg(classpath.join(":"));
     }
@@ -121,23 +147,39 @@ pub(crate) fn compile(root: &Effective, src_dir: &Path, classes: &Path, classpat
     if sources.is_empty() {
         return Ok(());
     }
-    let release = compiler_release(&root.props);
+    let level = JavaLevel::of(root);
+    let flags = level.args();
     eprintln!(
-        "  compiling {} sources with javac{}, {} classpath entries",
+        "  compiling {} sources with javac{}{}, {} classpath entries",
         sources.len(),
-        release.as_ref().map(|r| format!(" --release {r}")).unwrap_or_default(),
+        if flags.is_empty() { "" } else { " " },
+        flags.join(" "),
         classpath.len()
     );
-    let status = javac_command(classes, release.as_deref(), classpath, &sources).status().context("running javac")?;
+    let status = javac_command(classes, &level, classpath, &sources).status().context("running javac")?;
     if !status.success() {
         bail!("javac failed");
     }
     Ok(())
 }
 
+/// Files and directories Maven never copies as resources (plexus "default excludes": editor backups and
+/// version-control metadata). [Plexus `AbstractScanner`](https://codehaus-plexus.github.io/plexus-utils/apidocs/org/codehaus/plexus/util/AbstractScanner.html)
+fn default_excluded(name: &str) -> bool {
+    const DIRS: [&str; 7] = ["CVS", "RCS", "SCCS", ".svn", ".git", ".hg", ".bzr"];
+    const FILES: [&str; 10] = [".cvsignore", "vssver.scc", ".DS_Store", ".gitattributes", ".gitignore", ".gitmodules", ".hgignore", ".hgsub", ".hgtags", ".bzrignore"];
+    DIRS.contains(&name)
+        || FILES.contains(&name)
+        || name.ends_with('~')
+        || (name.starts_with('#') && name.ends_with('#'))
+        || name.starts_with(".#")
+        || (name.starts_with('%') && name.ends_with('%'))
+        || name.starts_with("._")
+}
+
 pub(crate) fn copy_resources(res_dir: &Path, classes: &Path) -> Result<()> {
     let mut resources = vec![];
-    walk(res_dir, &mut resources)?;
+    walk_filtered(res_dir, &|p| p.file_name().is_some_and(|n| default_excluded(&n.to_string_lossy())), &mut resources)?;
     if !resources.is_empty() {
         eprintln!("  copying {} resources", resources.len());
     }
@@ -266,11 +308,14 @@ fn skip_entry(cfg: &ShadeCfg, ga: &str, name: &str, seen: &HashSet<String>) -> b
     name.ends_with('/') || name == "META-INF/INDEX.LIST" || name == "module-info.class" || seen.contains(name) || (!ga.is_empty() && excluded(cfg, ga, name))
 }
 
-/// Appends `content` to `body`: blank lines are dropped, comment lines always kept, other lines only if new.
-fn merge_service_lines(body: &mut Vec<u8>, content: &str) {
+/// Appends `content` to `body`: every line not already there, in first-seen order, as Maven's
+/// `ServicesResourceTransformer` does. With `keep_comments` (shade 3.4.0 and older) comment and blank lines are
+/// always kept; otherwise they are lines like any other and a repeated `#` or blank collapses to one.
+fn merge_service_lines(body: &mut Vec<u8>, content: &str, keep_comments: bool) {
     let mut known: HashSet<String> = String::from_utf8_lossy(body).lines().map(str::to_string).collect();
-    for line in content.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()) {
-        if line.starts_with('#') || known.insert(line.to_string()) {
+    for line in content.lines() {
+        let always = keep_comments && (line.starts_with('#') || line.trim().is_empty());
+        if known.insert(line.to_string()) || always {
             body.extend_from_slice(line.as_bytes());
             body.push(b'\n');
         }
@@ -317,7 +362,7 @@ fn copy_entries<R: std::io::Read + std::io::Seek, W: Write + std::io::Seek>(
         if cfg.services && is_service_file(&name) {
             let mut buf = Vec::new();
             std::io::Read::read_to_end(&mut archive.by_index(i)?, &mut buf)?;
-            merge_service_lines(services.entry(name).or_default(), &String::from_utf8_lossy(&buf));
+            merge_service_lines(services.entry(name).or_default(), &String::from_utf8_lossy(&buf), cfg.services_keep_comments);
             continue;
         }
         seen.insert(name);
@@ -390,10 +435,27 @@ mod tests {
     }
 
     #[test]
-    fn service_lines_merge_without_duplicates_or_blank_lines_but_keep_comments() {
-        let mut body = b"one\n".to_vec();
-        merge_service_lines(&mut body, "one\n\n# c\ntwo  \n  \none\n# c\nthree\n");
-        assert_eq!(String::from_utf8(body).unwrap(), "one\n# c\ntwo\n# c\nthree\n");
+    fn version_control_and_editor_files_are_not_resources() {
+        for n in [".gitignore", ".gitkeep", ".DS_Store", ".git", "a.txt~", "#a#", ".#a", "._a", "CVS"] {
+            assert_eq!(default_excluded(n), n != ".gitkeep", "{n}");
+        }
+    }
+
+    fn merged(keep_comments: bool) -> String {
+        let mut body = vec![];
+        merge_service_lines(&mut body, "# c\n#\none\n\n#\n", keep_comments);
+        merge_service_lines(&mut body, "# c\none\n\ntwo\n", keep_comments);
+        String::from_utf8(body).unwrap()
+    }
+
+    #[test]
+    fn service_lines_merge_as_an_ordered_set_blank_and_comment_lines_included() {
+        assert_eq!(merged(false), "# c\n#\none\n\ntwo\n");
+    }
+
+    #[test]
+    fn older_shade_versions_keep_every_comment_and_blank_line() {
+        assert_eq!(merged(true), "# c\n#\none\n\n#\n# c\n\ntwo\n");
     }
 
     fn shaded(cfg: &ShadeCfg) -> PathBuf {
@@ -420,19 +482,47 @@ mod tests {
         assert_eq!(shaded(&cfg), PathBuf::from("t/x-1.0-fat.jar"));
     }
 
+    fn level(plugin: Option<(&str, &str, &str)>, props: &[(&str, &str)]) -> JavaLevel {
+        let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
+        let e = Effective {
+            gav: crate::pom::Gav::new("g", "a", "1"),
+            packaging: "jar".into(),
+            props: props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            managed: Default::default(),
+            deps: vec![],
+            repos: vec![],
+            shade: None,
+            compiler: plugin.map(|(r, s, t)| crate::pom::CompilerCfg { release: opt(r), source: opt(s), target: opt(t) }),
+            surefire: None,
+            failsafe: None,
+            relocation: None,
+        };
+        JavaLevel::of(&e)
+    }
+
     #[test]
-    fn compiler_release_prefers_release_over_target() {
-        let mut p = BTreeMap::new();
-        assert_eq!(compiler_release(&p), None);
-        p.insert("maven.compiler.target".into(), "11".into());
-        assert_eq!(compiler_release(&p).as_deref(), Some("11"));
-        p.insert("maven.compiler.release".into(), "17".into());
-        assert_eq!(compiler_release(&p).as_deref(), Some("17"));
+    fn release_beats_source_and_target_and_plugin_beats_properties() {
+        assert_eq!(level(None, &[]).args(), Vec::<String>::new());
+        assert_eq!(level(None, &[("maven.compiler.source", "11"), ("maven.compiler.target", "11")]).args(), ["-source", "11", "-target", "11"]);
+        assert_eq!(level(None, &[("maven.compiler.release", "17"), ("maven.compiler.target", "11")]).args(), ["--release", "17"]);
+        assert_eq!(level(Some(("", "21", "21")), &[("maven.compiler.release", "17")]).args(), ["--release", "17"]);
+        assert_eq!(level(Some(("", "21", "21")), &[("maven.compiler.target", "11")]).args(), ["-source", "21", "-target", "21"]);
+    }
+
+    #[test]
+    fn an_unresolved_expression_counts_as_unset_like_in_maven() {
+        assert_eq!(level(Some(("${maven.compiler.release}", "21", "21")), &[]).args(), ["-source", "21", "-target", "21"]);
+    }
+
+    #[test]
+    fn plugin_values_are_interpolated() {
+        let l = level(Some(("${rel}", "", "")), &[("rel", "17")]);
+        assert_eq!(l.args(), ["--release", "17"]);
     }
 
     #[test]
     fn javac_command_passes_release_classpath_and_sources() {
-        let cmd = javac_command(Path::new("out"), Some("17"), &["a.jar".into(), "b.jar".into()], &[PathBuf::from("A.java")]);
+        let cmd = javac_command(Path::new("out"), &level(None, &[("maven.compiler.release", "17")]), &["a.jar".into(), "b.jar".into()], &[PathBuf::from("A.java")]);
         let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, ["-d", "out", "-encoding", "UTF-8", "-proc:none", "-g", "--release", "17", "-cp", "a.jar:b.jar", "A.java"]);
     }

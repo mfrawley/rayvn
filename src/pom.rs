@@ -90,6 +90,8 @@ pub struct RawPom {
     pub relocation: Option<Relocation>,
     profiles: Vec<Profile>,
     pub shade: Option<ShadeCfg>,
+    /// `maven-compiler-plugin` configuration.
+    pub compiler: Option<CompilerCfg>,
     pub surefire: Option<TestCfg>,
     pub failsafe: Option<TestCfg>,
 }
@@ -143,6 +145,23 @@ fn parse_tests(root: Node, artifact: &str) -> Option<TestCfg> {
     Some(cfg)
 }
 
+/// What rayvn understands of `maven-compiler-plugin`: the Java level. Values are uninterpolated.
+/// [Compiler plugin](https://maven.apache.org/plugins/maven-compiler-plugin/compile-mojo.html)
+#[derive(Clone, Debug, Default)]
+pub struct CompilerCfg {
+    /// `<release>`: passed as `javac --release`.
+    pub release: Option<String>,
+    /// `<source>`: the language level when there is no `<release>`.
+    pub source: Option<String>,
+    /// `<target>`: the bytecode level when there is no `<release>`.
+    pub target: Option<String>,
+}
+
+fn parse_compiler(root: Node) -> Option<CompilerCfg> {
+    let conf = plugin_config(root, "maven-compiler-plugin")??;
+    Some(CompilerCfg { release: text(conf, "release"), source: text(conf, "source"), target: text(conf, "target") })
+}
+
 /// What rayvn understands of `maven-shade-plugin`: fat jar, its name and attachment, services merge,
 /// signature excludes, manifest.
 /// [Shade plugin](https://maven.apache.org/plugins/maven-shade-plugin/shade-mojo.html)
@@ -151,6 +170,9 @@ pub struct ShadeCfg {
     /// `ServicesResourceTransformer`: merge `META-INF/services/*` files instead of keeping only the first.
     /// [Resource transformers](https://maven.apache.org/plugins/maven-shade-plugin/examples/resource-transformers.html)
     pub services: bool,
+    /// `ServicesResourceTransformer` of shade 3.4.0 and older keeps every comment and blank line; 3.4.1 and newer
+    /// treat them as ordinary lines and drop repeats. Set from the plugin's `<version>`.
+    pub services_keep_comments: bool,
     /// `ManifestResourceTransformer` `<mainClass>`: becomes `Main-Class` in the manifest.
     pub main_class: Option<String>,
     /// `ManifestResourceTransformer` `<manifestEntries>`: extra manifest attributes.
@@ -168,9 +190,24 @@ pub struct ShadeCfg {
     pub ignored: Vec<String>,
 }
 
+/// True if `version` is a dotted number lower than `than`; anything unparsable is not older.
+pub(crate) fn version_older_than(version: &str, than: &str) -> bool {
+    let parts = |v: &str| v.split('.').map(|p| p.parse::<u32>().ok()).collect::<Option<Vec<_>>>();
+    matches!((parts(version), parts(than)), (Some(a), Some(b)) if a < b)
+}
+
+fn plugin_version(root: Node, artifact: &str) -> Option<String> {
+    let plugin = child(root, "build")
+        .and_then(|b| child(b, "plugins"))?
+        .children()
+        .find(|p| p.is_element() && text(*p, "artifactId").as_deref() == Some(artifact))?;
+    text(plugin, "version")
+}
+
 fn parse_shade(root: Node) -> Option<ShadeCfg> {
     let conf = plugin_config(root, "maven-shade-plugin")?;
     let mut cfg = ShadeCfg::default();
+    cfg.services_keep_comments = plugin_version(root, "maven-shade-plugin").is_some_and(|v| version_older_than(&v, "3.4.1"));
     let Some(conf) = conf else { return Some(cfg) };
     for t in child(conf, "transformers").into_iter().flat_map(|t| t.children().filter(|c| c.is_element())) {
         match t.attribute("implementation").unwrap_or("").rsplit('.').next().unwrap_or("") {
@@ -451,6 +488,7 @@ fn parse_raw(xml: &str) -> Result<RawPom> {
             .and_then(|d| child(d, "relocation"))
             .map(|r| Relocation { group: text(r, "groupId"), artifact: text(r, "artifactId"), version: text(r, "version") }),
         shade: parse_shade(root),
+        compiler: parse_compiler(root),
         surefire: parse_tests(root, "maven-surefire-plugin"),
         failsafe: parse_tests(root, "maven-failsafe-plugin"),
         profiles: child(root, "profiles").map(|p| p.children().filter(|c| c.is_element()).map(parse_profile).collect()).unwrap_or_default(),
@@ -474,6 +512,16 @@ mod tests {
         let here = if std::env::consts::OS == "macos" { "mac os x" } else if std::env::consts::OS == "linux" { "linux" } else { "windows" };
         assert_eq!(parse(&javafx_style(here, "here")).unwrap().props.get("javafx.platform").map(String::as_str), Some("here"));
         assert!(parse(&javafx_style("plan9", "there")).unwrap().props.is_empty());
+    }
+
+    #[test]
+    fn shade_3_4_0_and_older_keep_service_comments() {
+        let pom = |v: &str| format!("<project><artifactId>a</artifactId><build><plugins><plugin><artifactId>maven-shade-plugin</artifactId><version>{v}</version></plugin></plugins></build></project>");
+        assert!(parse(&pom("3.4.0")).unwrap().shade.unwrap().services_keep_comments);
+        assert!(parse(&pom("3.2.4")).unwrap().shade.unwrap().services_keep_comments);
+        assert!(!parse(&pom("3.4.1")).unwrap().shade.unwrap().services_keep_comments);
+        assert!(!parse(&pom("3.10.0")).unwrap().shade.unwrap().services_keep_comments);
+        assert!(!parse(&pom("${shade.version}")).unwrap().shade.unwrap().services_keep_comments);
     }
 
     #[test]

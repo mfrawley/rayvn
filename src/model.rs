@@ -32,6 +32,8 @@ pub struct Effective {
     pub repos: Vec<RepoDecl>,
     /// `maven-shade-plugin` configuration, inherited from the parent when the child declares none.
     pub shade: Option<pom::ShadeCfg>,
+    /// `maven-compiler-plugin` configuration (Java level), inherited from the parent when the child declares none.
+    pub compiler: Option<pom::CompilerCfg>,
     /// `maven-surefire-plugin` (unit tests) configuration, likewise inherited.
     pub surefire: Option<pom::TestCfg>,
     /// `maven-failsafe-plugin` (integration tests) configuration, likewise inherited.
@@ -167,9 +169,10 @@ impl<'a> Loader<'a> {
             repos.extend(p.repos.iter().cloned());
         }
         let shade = raw.shade.or_else(|| parent.as_ref().and_then(|p| p.shade.clone()));
+        let compiler = raw.compiler.or_else(|| parent.as_ref().and_then(|p| p.compiler.clone()));
         let surefire = raw.surefire.or_else(|| parent.as_ref().and_then(|p| p.surefire.clone()));
         let failsafe = raw.failsafe.or_else(|| parent.as_ref().and_then(|p| p.failsafe.clone()));
-        Ok(Effective { gav, packaging: raw.packaging, props, managed, deps, repos, shade, surefire, failsafe, relocation: raw.relocation })
+        Ok(Effective { gav, packaging: raw.packaging, props, managed, deps, repos, shade, compiler, surefire, failsafe, relocation: raw.relocation })
     }
 
     /// The parent's dependencyManagement plus this POM's own; imported BOMs fill in only what is not managed yet.
@@ -358,6 +361,7 @@ mod tests {
             deps,
             repos: vec![],
             shade: None,
+            compiler: None,
             surefire: None,
             failsafe: None,
             relocation: None,

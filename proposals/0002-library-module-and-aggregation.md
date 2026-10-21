@@ -82,6 +82,14 @@ A whole-checkout build from the root POM of a 40-POM repository: 23 modules buil
 - `<relocation>` is followed (`org.lz4:lz4-java:1.8.1` moved to `at.yawk.lz4`), with a warning. Only a node that wins mediation is loaded, so a losing candidate can never fail on its POM.
 - Shade `<filters>` with `*:*` matched nothing (the pattern was turned into a glob that cannot cross `:`), leaving `.SF`/`.RSA` signature files in fat jars.
 
+Jar diff against Maven (same commit, all 23 modules, 26 jars; `mvn package` 2:29, `rvn build` 36 s with warm caches). After the fixes below 22 jars are identical entry for entry, apart from the manifest and `META-INF/maven`:
+
+- The `maven-compiler-plugin` `<source>`/`<target>`/`<release>` configuration was ignored, so classes came out at the JDK's own level (class version 69 instead of 65). It is now read, beats the `maven.compiler.*` properties, and an unresolved `${...}` counts as unset, as in Maven.
+- Merged `META-INF/services` files: Maven keeps an ordered set of lines. Shade 3.4.0 and older also keep every repeated comment and blank line; 3.4.1 and newer do not. rayvn follows the plugin's `<version>`.
+- Resources: Maven never copies `.gitignore`, `.DS_Store`, editor backups and the like (plexus default excludes).
+
+What is left is not rayvn: Maven writes empty files as four NUL bytes; and one module resolved a different `analysis-0.4.7.jar` because the copy in `~/.m2` does not match its own `.sha1`. Gradle and Bazel share the first point with rayvn (neither reproduces Maven's byte layout); both build reproducible jars by fixing timestamps and entry order, which rayvn does not yet do. `target/classes` is not cleaned between builds, so a resource removed from the source stays in the jar until the directory is deleted.
+
 Not supported, and the reason a module was left out: version ranges (`[10.0.0,11.0.0)`, one module), and the `protoc` and `exec` plugins (not run; the POM of `routing-map-conversion` has its protoc plugin commented out, so it needs none). Left out on purpose: `archive`, which holds legacy and GUI code.
 
 ### Versions across modules
