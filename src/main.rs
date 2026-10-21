@@ -118,6 +118,18 @@ fn resolve_lines(resolved: &[resolve::Resolved]) -> Vec<String> {
         .collect()
 }
 
+/// Plugin executions that Maven would run during this build and rayvn does not.
+fn unrun_warnings(root: &model::Effective) -> Vec<String> {
+    root.unrun
+        .iter()
+        .map(|u| format!("warning: {}: Maven runs {u} during the build; rayvn does not, so the output may differ (docs/plugins.md)", root.gav.artifact))
+        .collect()
+}
+
+fn warn_unrun(root: &model::Effective) {
+    unrun_warnings(root).iter().for_each(|w| eprintln!("{w}"));
+}
+
 /// What `args.cmd` does for one module, once its dependencies are known. Returns `false` when nothing was built
 /// (so there is nothing to report).
 fn run_module(args: &Args, module: &reactor::Module, resolved: &[resolve::Resolved], provides_tests: bool, cx: &Services) -> Result<Vec<verify::TestOutcome>> {
@@ -130,6 +142,7 @@ fn run_module(args: &Args, module: &reactor::Module, resolved: &[resolve::Resolv
             if root.packaging != "jar" {
                 bail!("packaging '{}' is not supported yet (only jar)", root.packaging);
             }
+            warn_unrun(root);
             let main_classes = build::compile_main(root, dir, resolved)?;
             if args.cmd == "build" {
                 if provides_tests {
@@ -344,6 +357,29 @@ mod tests {
             test_report(&rows),
             ["tests by module:", "  a: 3 passed", "  c: 5 passed (4 cached)", "  total: 8 passed in 2 modules (4 cached); 1 modules have no tests"]
         );
+    }
+
+    #[test]
+    fn unrun_plugins_produce_one_warning_each_naming_the_module() {
+        let mut e = model::Effective {
+            gav: rayvn::pom::Gav::new("g", "mod", "1"),
+            packaging: "jar".into(),
+            props: Default::default(),
+            managed: Default::default(),
+            deps: vec![],
+            repos: vec![],
+            shade: None,
+            compiler: None,
+            surefire: None,
+            failsafe: None,
+            relocation: None,
+            unrun: vec!["exec-maven-plugin (exec at generate-sources)".into()],
+        };
+        let w = unrun_warnings(&e);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("mod") && w[0].contains("exec-maven-plugin (exec at generate-sources)") && w[0].contains("docs/plugins.md"), "{}", w[0]);
+        e.unrun.clear();
+        assert!(unrun_warnings(&e).is_empty());
     }
 
     #[test]

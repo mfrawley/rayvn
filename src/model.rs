@@ -40,6 +40,8 @@ pub struct Effective {
     pub failsafe: Option<pom::TestCfg>,
     /// The POM's own `<relocation>`: the artifact now lives elsewhere and dependents must use that instead.
     pub relocation: Option<pom::Relocation>,
+    /// Plugin executions rayvn does not run, from this POM and its parents (see `pom::RawPom::unrun`).
+    pub unrun: Vec<String>,
 }
 
 /// A module of the current workspace: its model and where its build output goes.
@@ -172,7 +174,8 @@ impl<'a> Loader<'a> {
         let compiler = raw.compiler.or_else(|| parent.as_ref().and_then(|p| p.compiler.clone()));
         let surefire = raw.surefire.or_else(|| parent.as_ref().and_then(|p| p.surefire.clone()));
         let failsafe = raw.failsafe.or_else(|| parent.as_ref().and_then(|p| p.failsafe.clone()));
-        Ok(Effective { gav, packaging: raw.packaging, props, managed, deps, repos, shade, compiler, surefire, failsafe, relocation: raw.relocation })
+        let unrun = merge_unrun(parent.as_ref().map(|p| p.unrun.as_slice()).unwrap_or_default(), raw.unrun);
+        Ok(Effective { gav, packaging: raw.packaging, props, managed, deps, repos, shade, compiler, surefire, failsafe, relocation: raw.relocation, unrun })
     }
 
     /// The parent's dependencyManagement plus this POM's own; imported BOMs fill in only what is not managed yet.
@@ -250,6 +253,17 @@ fn merge_dependencies(own: Vec<Dep>, parent: Option<&Effective>, managed: &HashM
         deps.extend(p.deps.iter().filter(|d| !own_keys.contains(&d.key())).cloned());
     }
     deps
+}
+
+/// The parent's unrun plugin executions, then this POM's own that the parent does not already have.
+fn merge_unrun(inherited: &[String], own: Vec<String>) -> Vec<String> {
+    let mut all = inherited.to_vec();
+    for u in own {
+        if !all.contains(&u) {
+            all.push(u);
+        }
+    }
+    all
 }
 
 /// Replaces `${key}` from `props`, repeatedly (properties may refer to properties); unknown keys stay as written.
@@ -362,6 +376,7 @@ mod tests {
             repos: vec![],
             shade: None,
             compiler: None,
+            unrun: vec![],
             surefire: None,
             failsafe: None,
             relocation: None,
@@ -379,6 +394,13 @@ mod tests {
         raw.version = version.map(Into::into);
         raw
 
+    }
+
+    #[test]
+    fn unrun_plugin_executions_are_inherited_and_listed_once() {
+        let own = vec!["x (package)".to_string(), "y (compile)".to_string()];
+        assert_eq!(merge_unrun(&["x (package)".to_string()], own), ["x (package)", "y (compile)"]);
+        assert!(merge_unrun(&[], vec![]).is_empty());
     }
 
     #[test]

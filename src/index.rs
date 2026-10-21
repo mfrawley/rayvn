@@ -46,6 +46,36 @@ pub struct Index {
     state: Mutex<State>,
 }
 
+/// The first field of an index line: what kind of record it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tag {
+    Miss,
+    Snap,
+    From,
+    Val,
+}
+
+impl Tag {
+    fn as_str(self) -> &'static str {
+        match self {
+            Tag::Miss => "miss",
+            Tag::Snap => "snap",
+            Tag::From => "from",
+            Tag::Val => "val",
+        }
+    }
+
+    /// `None` for a tag this version does not know, so lines from a newer rayvn are skipped.
+    fn parse(s: &str) -> Option<Tag> {
+        [Tag::Miss, Tag::Snap, Tag::From, Tag::Val].into_iter().find(|t| t.as_str() == s)
+    }
+
+    /// A line of this kind: the tag, then the fields, tab separated.
+    fn line(self, fields: &[&str]) -> String {
+        std::iter::once(self.as_str()).chain(fields.iter().copied()).collect::<Vec<_>>().join("\t")
+    }
+}
+
 fn clean(s: &str) -> String {
     s.replace(['\t', '\n', '\r'], " ")
 }
@@ -55,23 +85,24 @@ fn parse(text: &str, now: u64, miss_ttl: u64, use_misses: bool) -> State {
     for line in text.lines() {
         st.lines += 1;
         let f: Vec<&str> = line.split('\t').collect();
-        match f.as_slice() {
-            ["miss", ts, repo, auth, path] if use_misses => {
+        let Some(tag) = f.first().and_then(|t| Tag::parse(t)) else { continue };
+        match (tag, &f[1..]) {
+            (Tag::Miss, [ts, repo, auth, path]) if use_misses => {
                 if let Ok(ts) = ts.parse::<u64>() {
                     if now.saturating_sub(ts) < miss_ttl {
                         st.misses.insert(format!("{repo}\t{auth}\t{path}"), ts);
                     }
                 }
             }
-            ["snap", path, repo, value, checked] => {
+            (Tag::Snap, [path, repo, value, checked]) => {
                 if let Ok(checked) = checked.parse() {
                     st.snaps.insert(path.to_string(), SnapshotStamp { repo: repo.to_string(), value: value.to_string(), checked });
                 }
             }
-            ["from", path, repo] => {
+            (Tag::From, [path, repo]) => {
                 st.origins.insert(path.to_string(), repo.to_string());
             }
-            ["val", path, etag, last_modified] => {
+            (Tag::Val, [path, etag, last_modified]) => {
                 let v = Validators {
                     etag: Some(etag.to_string()).filter(|s| !s.is_empty()),
                     last_modified: Some(last_modified.to_string()).filter(|s| !s.is_empty()),
@@ -89,20 +120,21 @@ fn parse(text: &str, now: u64, miss_ttl: u64, use_misses: bool) -> State {
 }
 
 fn format_state(st: &State) -> String {
-    let mut out = String::new();
+    let mut lines = vec![];
     for (k, ts) in &st.misses {
-        out.push_str(&format!("miss\t{ts}\t{k}\n"));
+        let key: Vec<&str> = k.split('\t').collect();
+        lines.push(Tag::Miss.line(&[&[ts.to_string().as_str()], key.as_slice()].concat()));
     }
     for (p, s) in &st.snaps {
-        out.push_str(&format!("snap\t{p}\t{}\t{}\t{}\n", s.repo, s.value, s.checked));
+        lines.push(Tag::Snap.line(&[p, &s.repo, &s.value, &s.checked.to_string()]));
     }
     for (p, r) in &st.origins {
-        out.push_str(&format!("from\t{p}\t{r}\n"));
+        lines.push(Tag::From.line(&[p, r]));
     }
     for (p, v) in &st.vals {
-        out.push_str(&format!("val\t{p}\t{}\t{}\n", v.etag.as_deref().unwrap_or(""), v.last_modified.as_deref().unwrap_or("")));
+        lines.push(Tag::Val.line(&[p, v.etag.as_deref().unwrap_or(""), v.last_modified.as_deref().unwrap_or("")]));
     }
-    out
+    lines.iter().map(|l| format!("{l}\n")).collect()
 }
 
 impl Index {
@@ -146,7 +178,8 @@ impl Index {
             return;
         }
         let fields: Vec<String> = key.split('\t').map(clean).collect();
-        self.append(&format!("miss\t{now}\t{}", fields.join("\t")));
+        let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+        self.append(&Tag::Miss.line(&[&[now.to_string().as_str()], fields.as_slice()].concat()));
     }
 
     pub fn snapshot(&self, path: &str) -> Option<SnapshotStamp> {
@@ -154,7 +187,7 @@ impl Index {
     }
 
     pub fn set_snapshot(&self, path: &str, s: SnapshotStamp) {
-        self.append(&format!("snap\t{}\t{}\t{}\t{}", clean(path), clean(&s.repo), clean(&s.value), s.checked));
+        self.append(&Tag::Snap.line(&[&clean(path), &clean(&s.repo), &clean(&s.value), &s.checked.to_string()]));
         self.state.lock().unwrap().snaps.insert(path.to_string(), s);
     }
 
@@ -165,7 +198,7 @@ impl Index {
 
     pub fn set_origin(&self, path: &str, repo: &str) {
         if self.state.lock().unwrap().origins.insert(path.to_string(), repo.to_string()).as_deref() != Some(repo) {
-            self.append(&format!("from\t{}\t{}", clean(path), clean(repo)));
+            self.append(&Tag::From.line(&[&clean(path), &clean(repo)]));
         }
     }
 
@@ -174,7 +207,7 @@ impl Index {
     }
 
     pub fn set_validators(&self, path: &str, v: Validators) {
-        self.append(&format!("val\t{}\t{}\t{}", clean(path), clean(v.etag.as_deref().unwrap_or("")), clean(v.last_modified.as_deref().unwrap_or(""))));
+        self.append(&Tag::Val.line(&[&clean(path), &clean(v.etag.as_deref().unwrap_or("")), &clean(v.last_modified.as_deref().unwrap_or(""))]));
         self.state.lock().unwrap().vals.insert(path.to_string(), v);
     }
 }
@@ -185,6 +218,16 @@ mod tests {
 
     fn stamp() -> SnapshotStamp {
         SnapshotStamp { repo: "r".into(), value: "1.0-20240101.000000-3".into(), checked: 42 }
+    }
+
+    #[test]
+    fn every_tag_round_trips_and_unknown_ones_are_skipped() {
+        for t in [Tag::Miss, Tag::Snap, Tag::From, Tag::Val] {
+            assert_eq!(Tag::parse(t.as_str()), Some(t));
+        }
+        assert_eq!(Tag::parse("future"), None);
+        assert_eq!(Tag::From.line(&["a/b", "central"]), "from\ta/b\tcentral");
+        assert_eq!(parse("future\tx\ny\n", 0, 1, true).lines, 2);
     }
 
     #[test]

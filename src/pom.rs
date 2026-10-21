@@ -94,6 +94,8 @@ pub struct RawPom {
     pub compiler: Option<CompilerCfg>,
     pub surefire: Option<TestCfg>,
     pub failsafe: Option<TestCfg>,
+    /// Plugin executions in `<build><plugins>` that rayvn does not run, as `artifactId (goals at phase)`.
+    pub unrun: Vec<String>,
 }
 
 /// What rayvn understands of `maven-surefire-plugin` (unit tests, phase `test`) and `maven-failsafe-plugin`
@@ -126,6 +128,48 @@ fn plugin_config<'a, 'i>(root: Node<'a, 'i>, artifact: &str) -> Option<Option<No
         .find(|p| p.is_element() && text(*p, "artifactId").as_deref() == Some(artifact))?;
     let exec = child(plugin, "executions").and_then(|e| e.children().find(|x| x.is_element()));
     Some(exec.and_then(|e| child(e, "configuration")).or_else(|| child(plugin, "configuration")))
+}
+
+/// Plugins whose executions rayvn performs itself (see `docs/plugins.md`), or whose absence changes no build
+/// output (`clean`, `install`, `deploy`, `site`).
+const HANDLED_PLUGINS: [&str; 10] = [
+    "maven-compiler-plugin",
+    "maven-resources-plugin",
+    "maven-jar-plugin",
+    "maven-shade-plugin",
+    "maven-surefire-plugin",
+    "maven-failsafe-plugin",
+    "maven-clean-plugin",
+    "maven-install-plugin",
+    "maven-deploy-plugin",
+    "maven-site-plugin",
+];
+
+/// Executions bound to a lifecycle phase by a plugin that rayvn does not run, e.g. `exec-maven-plugin (exec at
+/// generate-sources)`. A plugin that is only configured, with no `<execution>`, runs when someone calls its goal
+/// by hand (`mvn exec:java`) and is not part of the build; neither is an execution with `<phase>none</phase>`.
+fn parse_unrun(root: Node) -> Vec<String> {
+    let Some(plugins) = child(root, "build").and_then(|b| child(b, "plugins")) else { return vec![] };
+    let mut out = vec![];
+    for plugin in plugins.children().filter(|p| p.is_element()) {
+        let Some(artifact) = text(plugin, "artifactId") else { continue };
+        if HANDLED_PLUGINS.contains(&artifact.as_str()) {
+            continue;
+        }
+        for exec in child(plugin, "executions").into_iter().flat_map(|e| e.children().filter(|x| x.is_element())) {
+            let phase = text(exec, "phase");
+            if phase.as_deref() == Some("none") {
+                continue;
+            }
+            let goals: Vec<String> = child(exec, "goals").map(|g| g.children().filter(|c| c.is_element()).map(node_text).collect()).unwrap_or_default();
+            let goals = if goals.is_empty() { "default goals".to_string() } else { goals.join(", ") };
+            out.push(match phase {
+                Some(p) => format!("{artifact} ({goals} at {p})"),
+                None => format!("{artifact} ({goals})"),
+            });
+        }
+    }
+    out
 }
 
 fn parse_tests(root: Node, artifact: &str) -> Option<TestCfg> {
@@ -491,6 +535,7 @@ fn parse_raw(xml: &str) -> Result<RawPom> {
         compiler: parse_compiler(root),
         surefire: parse_tests(root, "maven-surefire-plugin"),
         failsafe: parse_tests(root, "maven-failsafe-plugin"),
+        unrun: parse_unrun(root),
         profiles: child(root, "profiles").map(|p| p.children().filter(|c| c.is_element()).map(parse_profile).collect()).unwrap_or_default(),
     })
 }
@@ -505,6 +550,44 @@ mod tests {
              <property><name>javafx.monocle</name><value>!true</value></property></activation>\
              <properties><javafx.platform>{platform}</javafx.platform></properties></profile></profiles></project>"
         )
+    }
+
+    fn unrun_of(plugins: &str) -> Vec<String> {
+        parse(&format!("<project><artifactId>p</artifactId><build><plugins>{plugins}</plugins></build></project>")).unwrap().unrun
+    }
+
+    fn plugin(artifact: &str, executions: &str) -> String {
+        format!("<plugin><artifactId>{artifact}</artifactId><executions>{executions}</executions></plugin>")
+    }
+
+    #[test]
+    fn a_phase_bound_execution_of_a_plugin_rayvn_does_not_run_is_reported() {
+        let exec = plugin("exec-maven-plugin", "<execution><phase>generate-sources</phase><goals><goal>exec</goal><goal>java</goal></goals></execution>");
+        assert_eq!(unrun_of(&exec), ["exec-maven-plugin (exec, java at generate-sources)"]);
+    }
+
+    #[test]
+    fn an_execution_without_a_phase_or_goals_is_still_reported() {
+        assert_eq!(unrun_of(&plugin("x-plugin", "<execution><goals><goal>g</goal></goals></execution>")), ["x-plugin (g)"]);
+        assert_eq!(unrun_of(&plugin("x-plugin", "<execution><phase>package</phase></execution>")), ["x-plugin (default goals at package)"]);
+    }
+
+    #[test]
+    fn a_plugin_that_is_only_configured_is_not_part_of_the_build() {
+        let cfg = "<plugin><artifactId>exec-maven-plugin</artifactId><configuration><mainClass>m.Run</mainClass></configuration></plugin>";
+        assert!(unrun_of(cfg).is_empty());
+    }
+
+    #[test]
+    fn an_execution_bound_to_phase_none_does_not_run() {
+        assert!(unrun_of(&plugin("x-plugin", "<execution><phase>none</phase><goals><goal>g</goal></goals></execution>")).is_empty());
+    }
+
+    #[test]
+    fn plugins_rayvn_handles_are_not_reported() {
+        for p in ["maven-shade-plugin", "maven-failsafe-plugin", "maven-compiler-plugin", "maven-install-plugin"] {
+            assert!(unrun_of(&plugin(p, "<execution><phase>package</phase><goals><goal>g</goal></goals></execution>")).is_empty(), "{p}");
+        }
     }
 
     #[test]

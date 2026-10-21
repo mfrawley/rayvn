@@ -548,6 +548,7 @@ mod tests {
             surefire: None,
             failsafe: None,
             relocation: None,
+            unrun: vec![],
         };
         JavaLevel::of(&e)
     }

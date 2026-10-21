@@ -272,6 +272,7 @@ mod tests {
                 repos: vec![],
                 shade: None,
                 compiler: None,
+            unrun: vec![],
                 surefire: None,
                 failsafe: None,
                 relocation: None,
