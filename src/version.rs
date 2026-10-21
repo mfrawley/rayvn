@@ -57,13 +57,21 @@ fn qualifier_key(q: &str) -> String {
 /// Maven's `Item.compareTo(item)`, with `None` standing for a missing item (a shorter version).
 fn cmp_item(l: &Item, r: Option<&Item>) -> Ordering {
     match (l, r) {
-        (Item::Int(n), None) => if *n == 0 { Ordering::Equal } else { Ordering::Greater },
+        (Item::Int(n), None) => {
+            if *n == 0 {
+                Ordering::Equal
+            } else {
+                Ordering::Greater
+            }
+        }
         (Item::Int(a), Some(Item::Int(b))) => a.cmp(b),
         (Item::Int(_), Some(_)) => Ordering::Greater,
         (Item::Str(s), None) => qualifier_key(s).cmp(&qualifier_key("")),
         (Item::Str(a), Some(Item::Str(b))) => qualifier_key(a).cmp(&qualifier_key(b)),
         (Item::Str(_), Some(_)) => Ordering::Less,
-        (Item::List(l), None) => l.first().map_or(Ordering::Equal, |first| cmp_item(first, None)),
+        (Item::List(l), None) => l
+            .first()
+            .map_or(Ordering::Equal, |first| cmp_item(first, None)),
         (Item::List(_), Some(Item::Int(_))) => Ordering::Less,
         (Item::List(_), Some(Item::Str(_))) => Ordering::Greater,
         (Item::List(a), Some(Item::List(b))) => {
@@ -113,7 +121,13 @@ impl Version {
         let lower = raw.to_lowercase();
         let chars: Vec<char> = lower.chars().collect();
         let sub = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
-        let item = |is_digit: bool, s: &str| if is_digit { Item::number(s) } else { Item::qualifier(s, false) };
+        let item = |is_digit: bool, s: &str| {
+            if is_digit {
+                Item::number(s)
+            } else {
+                Item::qualifier(s, false)
+            }
+        };
 
         // `lists[0]` is the root; every `-` or digit/letter change opens a nested list, as in Maven.
         let mut lists: Vec<Vec<Item>> = vec![vec![]];
@@ -121,7 +135,11 @@ impl Version {
         for (i, &c) in chars.iter().enumerate() {
             if c == '.' || c == '-' {
                 let cur = lists.last_mut().unwrap();
-                cur.push(if i == start { Item::Int(0) } else { item(is_digit, &sub(start, i)) });
+                cur.push(if i == start {
+                    Item::Int(0)
+                } else {
+                    item(is_digit, &sub(start, i))
+                });
                 start = i + 1;
                 if c == '-' {
                     lists.push(vec![]);
@@ -131,7 +149,10 @@ impl Version {
                     if !lists.last().unwrap().is_empty() {
                         lists.push(vec![]);
                     }
-                    lists.last_mut().unwrap().push(Item::qualifier(&sub(start, i), true));
+                    lists
+                        .last_mut()
+                        .unwrap()
+                        .push(Item::qualifier(&sub(start, i), true));
                     start = i;
                     lists.push(vec![]);
                 }
@@ -149,7 +170,10 @@ impl Version {
             if !is_digit && !lists.last().unwrap().is_empty() {
                 lists.push(vec![]);
             }
-            lists.last_mut().unwrap().push(item(is_digit, &sub(start, chars.len())));
+            lists
+                .last_mut()
+                .unwrap()
+                .push(item(is_digit, &sub(start, chars.len())));
         }
 
         // Fold the nested lists back, innermost first, trimming each as it closes.
@@ -160,7 +184,10 @@ impl Version {
         }
         let mut items = lists.pop().unwrap();
         normalize(&mut items);
-        Version { raw: raw.to_string(), items }
+        Version {
+            raw: raw.to_string(),
+            items,
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -170,7 +197,10 @@ impl Version {
 
 impl Ord for Version {
     fn cmp(&self, other: &Self) -> Ordering {
-        cmp_item(&Item::List(self.items.clone()), Some(&Item::List(other.items.clone())))
+        cmp_item(
+            &Item::List(self.items.clone()),
+            Some(&Item::List(other.items.clone())),
+        )
     }
 }
 
@@ -232,20 +262,32 @@ impl Constraint {
         let mut intervals = vec![];
         while !rest.is_empty() {
             let (open, Some(end)) = (rest.chars().next().unwrap(), rest.find([']', ')'])) else {
-                bail!("invalid version range '{spec}': every '[' or '(' needs a closing ']' or ')'");
+                bail!(
+                    "invalid version range '{spec}': every '[' or '(' needs a closing ']' or ')'"
+                );
             };
             if !matches!(open, '[' | '(') {
                 bail!("invalid version range '{spec}': expected '[' or '(' before '{rest}'");
             }
             let (lower_incl, upper_incl) = (open == '[', rest.as_bytes()[end] == b']');
             let body = &rest[1..end];
-            let bound = |s: &str, inclusive| (!s.trim().is_empty()).then(|| Bound { version: Version::parse(s.trim()), inclusive });
+            let bound = |s: &str, inclusive| {
+                (!s.trim().is_empty()).then(|| Bound {
+                    version: Version::parse(s.trim()),
+                    inclusive,
+                })
+            };
             let interval = match body.split_once(',') {
                 None => {
                     if !(lower_incl && upper_incl) || body.trim().is_empty() {
-                        bail!("invalid version range '{spec}': a single version must be written [1.0]");
+                        bail!(
+                            "invalid version range '{spec}': a single version must be written [1.0]"
+                        );
                     }
-                    Interval { lower: bound(body, true), upper: bound(body, true) }
+                    Interval {
+                        lower: bound(body, true),
+                        upper: bound(body, true),
+                    }
                 }
                 Some((l, u)) => {
                     if u.contains(',') {
@@ -254,8 +296,14 @@ impl Constraint {
                     let (lower, upper) = (bound(l, lower_incl), bound(u, upper_incl));
                     if let (Some(lo), Some(hi)) = (&lower, &upper) {
                         match lo.version.cmp(&hi.version) {
-                            Ordering::Greater => bail!("invalid version range '{spec}': lower bound {} is above upper bound {}", lo.version.as_str(), hi.version.as_str()),
-                            Ordering::Equal if !(lo.inclusive && hi.inclusive) => bail!("invalid version range '{spec}': an empty interval"),
+                            Ordering::Greater => bail!(
+                                "invalid version range '{spec}': lower bound {} is above upper bound {}",
+                                lo.version.as_str(),
+                                hi.version.as_str()
+                            ),
+                            Ordering::Equal if !(lo.inclusive && hi.inclusive) => {
+                                bail!("invalid version range '{spec}': an empty interval")
+                            }
                             _ => {}
                         }
                     }
@@ -265,7 +313,15 @@ impl Constraint {
             intervals.push(interval);
             rest = rest[end + 1..].trim_start();
             if !rest.is_empty() {
-                rest = rest.strip_prefix(',').map(str::trim_start).filter(|r| !r.is_empty()).ok_or_else(|| anyhow::anyhow!("invalid version range '{spec}': intervals are separated by ','"))?;
+                rest = rest
+                    .strip_prefix(',')
+                    .map(str::trim_start)
+                    .filter(|r| !r.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "invalid version range '{spec}': intervals are separated by ','"
+                        )
+                    })?;
             }
         }
         Ok(Some(Constraint { intervals }))
@@ -274,7 +330,14 @@ impl Constraint {
     /// The one version a range such as `[1.2.3]` allows; no repository listing is needed to resolve it.
     pub fn exact(&self) -> Option<&str> {
         match self.intervals.as_slice() {
-            [Interval { lower: Some(lo), upper: Some(hi) }] if lo.inclusive && hi.inclusive && lo.version.as_str() == hi.version.as_str() => Some(lo.version.as_str()),
+            [
+                Interval {
+                    lower: Some(lo),
+                    upper: Some(hi),
+                },
+            ] if lo.inclusive && hi.inclusive && lo.version.as_str() == hi.version.as_str() => {
+                Some(lo.version.as_str())
+            }
             _ => None,
         }
     }
@@ -324,12 +387,29 @@ mod tests {
 
     #[test]
     fn trailing_zeros_and_release_aliases_are_ignored() {
-        equal(&["1", "1.0", "1.0.0", "1-ga", "1.0-final", "1-release", "1.0-0"]);
+        equal(&[
+            "1",
+            "1.0",
+            "1.0.0",
+            "1-ga",
+            "1.0-final",
+            "1-release",
+            "1.0-0",
+        ]);
     }
 
     #[test]
     fn qualifiers_order_as_in_the_maven_specification() {
-        ascending(&["1.0-alpha", "1.0-beta", "1.0-milestone", "1.0-rc", "1.0-snapshot", "1.0", "1.0-sp", "1.0.1"]);
+        ascending(&[
+            "1.0-alpha",
+            "1.0-beta",
+            "1.0-milestone",
+            "1.0-rc",
+            "1.0-snapshot",
+            "1.0",
+            "1.0-sp",
+            "1.0.1",
+        ]);
     }
 
     #[test]
@@ -359,7 +439,14 @@ mod tests {
 
     #[test]
     fn real_world_versions_order_sensibly() {
-        ascending(&["2.9.10", "2.9.10.8", "2.10.0", "2.13.4.2", "2.14.0-rc1", "2.14.0"]);
+        ascending(&[
+            "2.9.10",
+            "2.9.10.8",
+            "2.10.0",
+            "2.13.4.2",
+            "2.14.0-rc1",
+            "2.14.0",
+        ]);
         ascending(&["10.0.0", "10.178.1", "10.999.0", "11.0.0"]);
         ascending(&["33.0.0-jre", "33.1.0-jre"]);
     }
@@ -394,9 +481,18 @@ mod tests {
 
     #[test]
     fn an_exact_range_names_its_version() {
-        assert_eq!(Constraint::parse("[1.2.3]").unwrap().unwrap().exact(), Some("1.2.3"));
-        assert_eq!(Constraint::parse("[1.2,1.3]").unwrap().unwrap().exact(), None);
-        assert_eq!(Constraint::parse("[1.2],[1.3]").unwrap().unwrap().exact(), None);
+        assert_eq!(
+            Constraint::parse("[1.2.3]").unwrap().unwrap().exact(),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            Constraint::parse("[1.2,1.3]").unwrap().unwrap().exact(),
+            None
+        );
+        assert_eq!(
+            Constraint::parse("[1.2],[1.3]").unwrap().unwrap().exact(),
+            None
+        );
     }
 
     #[test]
@@ -414,19 +510,41 @@ mod tests {
 
     #[test]
     fn snapshots_are_not_picked() {
-        assert_eq!(pick("[1.0,2.0)", &["1.5", "1.9-SNAPSHOT", "2.0-SNAPSHOT"]).as_deref(), Some("1.5"));
+        assert_eq!(
+            pick("[1.0,2.0)", &["1.5", "1.9-SNAPSHOT", "2.0-SNAPSHOT"]).as_deref(),
+            Some("1.5")
+        );
     }
 
     #[test]
     fn pre_releases_inside_the_range_are_eligible_but_lose_to_the_release() {
-        assert_eq!(pick("[1.0,2.0)", &["1.5", "1.6-rc1"]).as_deref(), Some("1.6-rc1"));
-        assert_eq!(pick("[1.0,2.0)", &["1.6", "1.6-rc1"]).as_deref(), Some("1.6"));
-        assert_eq!(pick("[1.0,2.0)", &["2.0-rc1", "1.5"]).as_deref(), Some("2.0-rc1"));
+        assert_eq!(
+            pick("[1.0,2.0)", &["1.5", "1.6-rc1"]).as_deref(),
+            Some("1.6-rc1")
+        );
+        assert_eq!(
+            pick("[1.0,2.0)", &["1.6", "1.6-rc1"]).as_deref(),
+            Some("1.6")
+        );
+        assert_eq!(
+            pick("[1.0,2.0)", &["2.0-rc1", "1.5"]).as_deref(),
+            Some("2.0-rc1")
+        );
     }
 
     #[test]
     fn malformed_ranges_are_rejected_with_the_range_in_the_message() {
-        for bad in ["[1.0,2.0", "[1.0", "(1.0)", "[1.0,2.0],", "[2.0,1.0]", "[1.0,1.0)", "[1,2,3]", "[]", "[1.0,2.0] x"] {
+        for bad in [
+            "[1.0,2.0",
+            "[1.0",
+            "(1.0)",
+            "[1.0,2.0],",
+            "[2.0,1.0]",
+            "[1.0,1.0)",
+            "[1,2,3]",
+            "[]",
+            "[1.0,2.0] x",
+        ] {
             let e = Constraint::parse(bad).unwrap_err().to_string();
             assert!(e.contains(bad), "{bad}: {e}");
         }

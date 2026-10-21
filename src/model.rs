@@ -65,7 +65,11 @@ pub struct LocalModules {
 impl LocalModules {
     pub fn register(&mut self, effective: Effective, dir: &Path) {
         let gav = effective.gav.clone();
-        let module = LocalModule { effective: Arc::new(effective), classes: dir.join("target/classes"), test_classes: dir.join("target/test-classes") };
+        let module = LocalModule {
+            effective: Arc::new(effective),
+            classes: dir.join("target/classes"),
+            test_classes: dir.join("target/test-classes"),
+        };
         self.modules.insert(gav, module);
     }
 
@@ -97,7 +101,11 @@ pub struct Loader<'a> {
 
 impl<'a> Loader<'a> {
     pub fn new(repos: &'a Repos) -> Self {
-        Loader { repos, cache: Mutex::new(HashMap::new()), locals: LocalModules::default() }
+        Loader {
+            repos,
+            cache: Mutex::new(HashMap::new()),
+            locals: LocalModules::default(),
+        }
     }
 
     /// Makes `effective` (built in `dir`) resolvable as a workspace module; do this before resolving.
@@ -110,7 +118,8 @@ impl<'a> Loader<'a> {
     }
 
     pub fn from_file(&self, path: &Path) -> Result<Effective> {
-        let xml = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let xml =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let raw = pom::parse(&xml).with_context(|| path.display().to_string())?;
         self.build(raw, 0, path.parent())
     }
@@ -142,12 +151,20 @@ impl<'a> Loader<'a> {
     }
 
     /// The parent POM on disk (`relativePath`, default `../pom.xml`), used only if its coordinates match.
-    fn local_parent(&self, p: &ParentRef, dir: &Path, depth: usize) -> Result<Option<Arc<Effective>>> {
-        let Some(path) = local_parent_path(p, dir) else { return Ok(None) };
+    fn local_parent(
+        &self,
+        p: &ParentRef,
+        dir: &Path,
+        depth: usize,
+    ) -> Result<Option<Arc<Effective>>> {
+        let Some(path) = local_parent_path(p, dir) else {
+            return Ok(None);
+        };
         if depth > 30 {
             bail!("parent chain too deep at {}", path.display());
         }
-        let xml = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let xml = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
         let raw = pom::parse(&xml).with_context(|| path.display().to_string())?;
         let eff = self.build(raw, depth + 1, path.parent())?;
         Ok((eff.gav == p.gav).then(|| Arc::new(eff)))
@@ -155,7 +172,11 @@ impl<'a> Loader<'a> {
 
     fn build(&self, raw: RawPom, depth: usize, dir: Option<&Path>) -> Result<Effective> {
         let parent = match &raw.parent {
-            Some(p) => match dir.map(|d| self.local_parent(p, d, depth)).transpose()?.flatten() {
+            Some(p) => match dir
+                .map(|d| self.local_parent(p, d, depth))
+                .transpose()?
+                .flatten()
+            {
                 Some(e) => Some(e),
                 None => Some(self.load_depth(&p.gav, depth + 1)?),
             },
@@ -170,20 +191,57 @@ impl<'a> Loader<'a> {
         if let Some(p) = &parent {
             repos.extend(p.repos.iter().cloned());
         }
-        let shade = raw.shade.or_else(|| parent.as_ref().and_then(|p| p.shade.clone()));
-        let compiler = raw.compiler.or_else(|| parent.as_ref().and_then(|p| p.compiler.clone()));
-        let surefire = raw.surefire.or_else(|| parent.as_ref().and_then(|p| p.surefire.clone()));
-        let failsafe = raw.failsafe.or_else(|| parent.as_ref().and_then(|p| p.failsafe.clone()));
-        let unrun = merge_unrun(parent.as_ref().map(|p| p.unrun.as_slice()).unwrap_or_default(), raw.unrun);
-        Ok(Effective { gav, packaging: raw.packaging, props, managed, deps, repos, shade, compiler, surefire, failsafe, relocation: raw.relocation, unrun })
+        let shade = raw
+            .shade
+            .or_else(|| parent.as_ref().and_then(|p| p.shade.clone()));
+        let compiler = raw
+            .compiler
+            .or_else(|| parent.as_ref().and_then(|p| p.compiler.clone()));
+        let surefire = raw
+            .surefire
+            .or_else(|| parent.as_ref().and_then(|p| p.surefire.clone()));
+        let failsafe = raw
+            .failsafe
+            .or_else(|| parent.as_ref().and_then(|p| p.failsafe.clone()));
+        let unrun = merge_unrun(
+            parent
+                .as_ref()
+                .map(|p| p.unrun.as_slice())
+                .unwrap_or_default(),
+            raw.unrun,
+        );
+        Ok(Effective {
+            gav,
+            packaging: raw.packaging,
+            props,
+            managed,
+            deps,
+            repos,
+            shade,
+            compiler,
+            surefire,
+            failsafe,
+            relocation: raw.relocation,
+            unrun,
+        })
     }
 
     /// The parent's dependencyManagement plus this POM's own; imported BOMs fill in only what is not managed yet.
-    fn managed_versions(&self, own: Vec<Dep>, parent: Option<&Effective>, props: &BTreeMap<String, String>, depth: usize) -> Result<HashMap<String, Dep>> {
-        let mut managed: HashMap<String, Dep> = parent.map(|p| p.managed.clone()).unwrap_or_default();
+    fn managed_versions(
+        &self,
+        own: Vec<Dep>,
+        parent: Option<&Effective>,
+        props: &BTreeMap<String, String>,
+        depth: usize,
+    ) -> Result<HashMap<String, Dep>> {
+        let mut managed: HashMap<String, Dep> =
+            parent.map(|p| p.managed.clone()).unwrap_or_default();
         for d in own.into_iter().map(|d| interpolate_dep(d, props)) {
             if d.scope.as_deref() == Some("import") && d.typ == "pom" {
-                let v = d.version.clone().with_context(|| format!("BOM {}:{} has no version", d.group, d.artifact))?;
+                let v = d
+                    .version
+                    .clone()
+                    .with_context(|| format!("BOM {}:{} has no version", d.group, d.artifact))?;
                 let bom = self.load_depth(&Gav::new(&d.group, &d.artifact, &v), depth + 1)?;
                 for (k, bd) in &bom.managed {
                     managed.entry(k.clone()).or_insert_with(|| bd.clone());
@@ -198,8 +256,14 @@ impl<'a> Loader<'a> {
 
 /// groupId and version fall back to the parent's.
 fn project_gav(raw: &RawPom, parent: Option<&Effective>) -> Result<Gav> {
-    let group = raw.group.clone().or_else(|| parent.map(|p| p.gav.group.clone()));
-    let version = raw.version.clone().or_else(|| parent.map(|p| p.gav.version.clone()));
+    let group = raw
+        .group
+        .clone()
+        .or_else(|| parent.map(|p| p.gav.group.clone()));
+    let version = raw
+        .version
+        .clone()
+        .or_else(|| parent.map(|p| p.gav.version.clone()));
     match (group, version) {
         (Some(g), Some(v)) => Ok(Gav::new(&g, &raw.artifact, &v)),
         _ => bail!("cannot determine groupId/version of {}", raw.artifact),
@@ -207,7 +271,11 @@ fn project_gav(raw: &RawPom, parent: Option<&Effective>) -> Result<Gav> {
 }
 
 /// The parent's properties, overridden by the POM's own, plus the implicit `project.*` ones.
-fn effective_props(own: &BTreeMap<String, String>, gav: &Gav, parent: Option<&Effective>) -> BTreeMap<String, String> {
+fn effective_props(
+    own: &BTreeMap<String, String>,
+    gav: &Gav,
+    parent: Option<&Effective>,
+) -> BTreeMap<String, String> {
     let mut props = parent.map(|p| p.props.clone()).unwrap_or_default();
     props.extend(own.clone());
     props.insert("project.groupId".into(), gav.group.clone());
@@ -233,7 +301,12 @@ fn interpolate_dep(mut d: Dep, props: &BTreeMap<String, String>) -> Dep {
 
 /// Maven merges a parent's `<dependencies>` into the child: the child's own come first and win per key;
 /// a missing version, scope or exclusions is taken from dependencyManagement.
-fn merge_dependencies(own: Vec<Dep>, parent: Option<&Effective>, managed: &HashMap<String, Dep>, props: &BTreeMap<String, String>) -> Vec<Dep> {
+fn merge_dependencies(
+    own: Vec<Dep>,
+    parent: Option<&Effective>,
+    managed: &HashMap<String, Dep>,
+    props: &BTreeMap<String, String>,
+) -> Vec<Dep> {
     let own_keys: HashSet<String> = own.iter().map(|d| d.key()).collect();
     let mut deps: Vec<Dep> = own
         .into_iter()
@@ -250,7 +323,12 @@ fn merge_dependencies(own: Vec<Dep>, parent: Option<&Effective>, managed: &HashM
         })
         .collect();
     if let Some(p) = parent {
-        deps.extend(p.deps.iter().filter(|d| !own_keys.contains(&d.key())).cloned());
+        deps.extend(
+            p.deps
+                .iter()
+                .filter(|d| !own_keys.contains(&d.key()))
+                .cloned(),
+        );
     }
     deps
 }
@@ -330,9 +408,14 @@ fn local_chain(pom_path: &Path) -> Result<Vec<(PathBuf, RawPom)>> {
     let mut out = vec![];
     let mut cur = pom_path.to_path_buf();
     for _ in 0..30 {
-        let raw = pom::parse(&std::fs::read_to_string(&cur).with_context(|| format!("reading {}", cur.display()))?)
-            .with_context(|| cur.display().to_string())?;
-        let next = raw.parent.as_ref().and_then(|p| local_parent_path(p, cur.parent().unwrap_or(Path::new("."))));
+        let raw = pom::parse(
+            &std::fs::read_to_string(&cur).with_context(|| format!("reading {}", cur.display()))?,
+        )
+        .with_context(|| cur.display().to_string())?;
+        let next = raw
+            .parent
+            .as_ref()
+            .and_then(|p| local_parent_path(p, cur.parent().unwrap_or(Path::new("."))));
         out.push((cur, raw));
         let Some(next) = next else { break };
         cur = next;
@@ -363,14 +446,23 @@ mod tests {
     use super::*;
 
     fn dep(artifact: &str, version: Option<&str>) -> Dep {
-        Dep { group: "g".into(), artifact: artifact.into(), version: version.map(Into::into), typ: "jar".into(), ..Default::default() }
+        Dep {
+            group: "g".into(),
+            artifact: artifact.into(),
+            version: version.map(Into::into),
+            typ: "jar".into(),
+            ..Default::default()
+        }
     }
 
     fn effective(gav: Gav, props: &[(&str, &str)], deps: Vec<Dep>) -> Effective {
         Effective {
             gav,
             packaging: "jar".into(),
-            props: props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            props: props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             managed: HashMap::new(),
             deps,
             repos: vec![],
@@ -384,7 +476,11 @@ mod tests {
     }
 
     fn parent() -> Effective {
-        effective(Gav::new("pg", "parent", "7"), &[("a", "from-parent"), ("b", "from-parent")], vec![dep("inherited", Some("1")), dep("shared", Some("1"))])
+        effective(
+            Gav::new("pg", "parent", "7"),
+            &[("a", "from-parent"), ("b", "from-parent")],
+            vec![dep("inherited", Some("1")), dep("shared", Some("1"))],
+        )
     }
 
     fn raw(group: Option<&str>, version: Option<&str>) -> RawPom {
@@ -393,20 +489,28 @@ mod tests {
         raw.artifact = "x".into();
         raw.version = version.map(Into::into);
         raw
-
     }
 
     #[test]
     fn unrun_plugin_executions_are_inherited_and_listed_once() {
         let own = vec!["x (package)".to_string(), "y (compile)".to_string()];
-        assert_eq!(merge_unrun(&["x (package)".to_string()], own), ["x (package)", "y (compile)"]);
+        assert_eq!(
+            merge_unrun(&["x (package)".to_string()], own),
+            ["x (package)", "y (compile)"]
+        );
         assert!(merge_unrun(&[], vec![]).is_empty());
     }
 
     #[test]
     fn gav_falls_back_to_the_parent() {
-        assert_eq!(project_gav(&raw(None, None), Some(&parent())).unwrap(), Gav::new("pg", "x", "7"));
-        assert_eq!(project_gav(&raw(Some("g"), Some("2")), Some(&parent())).unwrap(), Gav::new("g", "x", "2"));
+        assert_eq!(
+            project_gav(&raw(None, None), Some(&parent())).unwrap(),
+            Gav::new("pg", "x", "7")
+        );
+        assert_eq!(
+            project_gav(&raw(Some("g"), Some("2")), Some(&parent())).unwrap(),
+            Gav::new("g", "x", "2")
+        );
         assert!(project_gav(&raw(None, None), None).is_err());
     }
 
@@ -416,8 +520,21 @@ mod tests {
         let props = effective_props(&own, &Gav::new("g", "x", "2"), Some(&parent()));
         assert_eq!(props["a"], "from-parent");
         assert_eq!(props["b"], "own");
-        assert_eq!((props["project.version"].as_str(), props["version"].as_str(), props["project.artifactId"].as_str()), ("2", "2", "x"));
-        assert_eq!((props["project.parent.version"].as_str(), props["project.parent.groupId"].as_str()), ("7", "pg"));
+        assert_eq!(
+            (
+                props["project.version"].as_str(),
+                props["version"].as_str(),
+                props["project.artifactId"].as_str()
+            ),
+            ("2", "2", "x")
+        );
+        assert_eq!(
+            (
+                props["project.parent.version"].as_str(),
+                props["project.parent.groupId"].as_str()
+            ),
+            ("7", "pg")
+        );
     }
 
     #[test]
@@ -426,20 +543,43 @@ mod tests {
         let props = BTreeMap::from([("v".to_string(), "9".to_string())]);
         let own = vec![dep("a", None), dep("shared", Some("${v}"))];
         let deps = merge_dependencies(own, Some(&parent()), &managed, &props);
-        let got: Vec<_> = deps.iter().map(|d| (d.artifact.as_str(), d.version.as_deref())).collect();
-        assert_eq!(got, [("a", Some("managed")), ("shared", Some("9")), ("inherited", Some("1"))]);
+        let got: Vec<_> = deps
+            .iter()
+            .map(|d| (d.artifact.as_str(), d.version.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a", Some("managed")),
+                ("shared", Some("9")),
+                ("inherited", Some("1"))
+            ]
+        );
     }
 
     #[test]
     fn local_modules_stand_in_for_the_jar_and_the_test_jar_only() {
         let mut locals = LocalModules::default();
         assert!(locals.is_empty());
-        locals.register(effective(Gav::new("g", "lib", "1"), &[], vec![]), Path::new("/w/lib"));
+        locals.register(
+            effective(Gav::new("g", "lib", "1"), &[], vec![]),
+            Path::new("/w/lib"),
+        );
         let gav = Gav::new("g", "lib", "1");
-        assert_eq!(locals.output(&gav, None, "jar"), Some(PathBuf::from("/w/lib/target/classes")));
-        assert_eq!(locals.output(&gav, Some("tests"), "test-jar"), Some(PathBuf::from("/w/lib/target/test-classes")));
+        assert_eq!(
+            locals.output(&gav, None, "jar"),
+            Some(PathBuf::from("/w/lib/target/classes"))
+        );
+        assert_eq!(
+            locals.output(&gav, Some("tests"), "test-jar"),
+            Some(PathBuf::from("/w/lib/target/test-classes"))
+        );
         assert_eq!(locals.output(&gav, Some("sources"), "jar"), None);
-        assert_eq!(locals.output(&Gav::new("g", "lib", "2"), None, "jar"), None, "another version is not the module");
+        assert_eq!(
+            locals.output(&Gav::new("g", "lib", "2"), None, "jar"),
+            None,
+            "another version is not the module"
+        );
         assert!(locals.get(&gav).is_some() && !locals.is_empty());
     }
 
@@ -447,12 +587,22 @@ mod tests {
     fn local_poms_lists_the_pom_then_its_parents_on_disk() {
         let d = std::env::temp_dir().join(format!("rvn-chain-{}", std::process::id()));
         std::fs::create_dir_all(d.join("child")).unwrap();
-        let pom = |parent: &str, name: &str| format!("<project>{parent}<groupId>g</groupId><artifactId>{name}</artifactId><version>1</version></project>");
+        let pom = |parent: &str, name: &str| {
+            format!(
+                "<project>{parent}<groupId>g</groupId><artifactId>{name}</artifactId><version>1</version></project>"
+            )
+        };
         std::fs::write(d.join("pom.xml"), pom("", "root")).unwrap();
         let parent = "<parent><groupId>g</groupId><artifactId>root</artifactId><version>1</version></parent>";
         std::fs::write(d.join("child/pom.xml"), pom(parent, "child")).unwrap();
-        assert_eq!(local_poms(&d.join("child/pom.xml")).unwrap().files, [d.join("child/pom.xml"), d.join("child/../pom.xml")]);
-        assert_eq!(local_poms(&d.join("pom.xml")).unwrap().files, [d.join("pom.xml")]);
+        assert_eq!(
+            local_poms(&d.join("child/pom.xml")).unwrap().files,
+            [d.join("child/pom.xml"), d.join("child/../pom.xml")]
+        );
+        assert_eq!(
+            local_poms(&d.join("pom.xml")).unwrap().files,
+            [d.join("pom.xml")]
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -464,6 +614,15 @@ mod tests {
         d.scope = Some("${p}".into());
         d.classifier = Some("${p}".into());
         let d = interpolate_dep(d, &props);
-        assert_eq!((d.group.as_str(), d.artifact.as_str(), d.version.as_deref(), d.scope.as_deref(), d.classifier.as_deref()), ("g-X", "a-X", Some("X"), Some("X"), Some("X")));
+        assert_eq!(
+            (
+                d.group.as_str(),
+                d.artifact.as_str(),
+                d.version.as_deref(),
+                d.scope.as_deref(),
+                d.classifier.as_deref()
+            ),
+            ("g-X", "a-X", Some("X"), Some("X"), Some("X"))
+        );
     }
 }

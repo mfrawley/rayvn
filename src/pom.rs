@@ -20,7 +20,11 @@ pub struct Gav {
 
 impl Gav {
     pub fn new(g: &str, a: &str, v: &str) -> Self {
-        Gav { group: g.into(), artifact: a.into(), version: v.into() }
+        Gav {
+            group: g.into(),
+            artifact: a.into(),
+            version: v.into(),
+        }
     }
 }
 
@@ -56,7 +60,13 @@ pub struct Dep {
 
 impl Dep {
     pub fn key(&self) -> String {
-        format!("{}:{}:{}:{}", self.group, self.artifact, self.typ, self.classifier.as_deref().unwrap_or(""))
+        format!(
+            "{}:{}:{}:{}",
+            self.group,
+            self.artifact,
+            self.typ,
+            self.classifier.as_deref().unwrap_or("")
+        )
     }
 }
 
@@ -127,7 +137,10 @@ fn plugin_config<'a, 'i>(root: Node<'a, 'i>, artifact: &str) -> Option<Option<No
         .children()
         .find(|p| p.is_element() && text(*p, "artifactId").as_deref() == Some(artifact))?;
     let exec = child(plugin, "executions").and_then(|e| e.children().find(|x| x.is_element()));
-    Some(exec.and_then(|e| child(e, "configuration")).or_else(|| child(plugin, "configuration")))
+    Some(
+        exec.and_then(|e| child(e, "configuration"))
+            .or_else(|| child(plugin, "configuration")),
+    )
 }
 
 /// Plugins whose executions rayvn performs itself (see `docs/plugins.md`), or whose absence changes no build
@@ -149,20 +162,38 @@ const HANDLED_PLUGINS: [&str; 10] = [
 /// generate-sources)`. A plugin that is only configured, with no `<execution>`, runs when someone calls its goal
 /// by hand (`mvn exec:java`) and is not part of the build; neither is an execution with `<phase>none</phase>`.
 fn parse_unrun(root: Node) -> Vec<String> {
-    let Some(plugins) = child(root, "build").and_then(|b| child(b, "plugins")) else { return vec![] };
+    let Some(plugins) = child(root, "build").and_then(|b| child(b, "plugins")) else {
+        return vec![];
+    };
     let mut out = vec![];
     for plugin in plugins.children().filter(|p| p.is_element()) {
-        let Some(artifact) = text(plugin, "artifactId") else { continue };
+        let Some(artifact) = text(plugin, "artifactId") else {
+            continue;
+        };
         if HANDLED_PLUGINS.contains(&artifact.as_str()) {
             continue;
         }
-        for exec in child(plugin, "executions").into_iter().flat_map(|e| e.children().filter(|x| x.is_element())) {
+        for exec in child(plugin, "executions")
+            .into_iter()
+            .flat_map(|e| e.children().filter(|x| x.is_element()))
+        {
             let phase = text(exec, "phase");
             if phase.as_deref() == Some("none") {
                 continue;
             }
-            let goals: Vec<String> = child(exec, "goals").map(|g| g.children().filter(|c| c.is_element()).map(node_text).collect()).unwrap_or_default();
-            let goals = if goals.is_empty() { "default goals".to_string() } else { goals.join(", ") };
+            let goals: Vec<String> = child(exec, "goals")
+                .map(|g| {
+                    g.children()
+                        .filter(|c| c.is_element())
+                        .map(node_text)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let goals = if goals.is_empty() {
+                "default goals".to_string()
+            } else {
+                goals.join(", ")
+            };
             out.push(match phase {
                 Some(p) => format!("{artifact} ({goals} at {p})"),
                 None => format!("{artifact} ({goals})"),
@@ -176,12 +207,36 @@ fn parse_tests(root: Node, artifact: &str) -> Option<TestCfg> {
     let conf = plugin_config(root, artifact)?;
     let mut cfg = TestCfg::default();
     let Some(conf) = conf else { return Some(cfg) };
-    let list = |name: &str| child(conf, name).map(|n| n.children().filter(|c| c.is_element()).map(node_text).collect()).unwrap_or_default();
+    let list = |name: &str| {
+        child(conf, name)
+            .map(|n| {
+                n.children()
+                    .filter(|c| c.is_element())
+                    .map(node_text)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     cfg.includes = list("includes");
     cfg.excludes = list("excludes");
-    cfg.skips = ["skip", "skipTests", "skipITs", "skipExec"].iter().filter_map(|k| text(conf, k)).collect();
+    cfg.skips = ["skip", "skipTests", "skipITs", "skipExec"]
+        .iter()
+        .filter_map(|k| text(conf, k))
+        .collect();
     cfg.arg_line = text(conf, "argLine");
-    for k in ["systemPropertyVariables", "environmentVariables", "groups", "excludedGroups", "forkCount", "parallel", "reuseForks", "properties", "dependenciesToScan", "additionalClasspathElements", "test"] {
+    for k in [
+        "systemPropertyVariables",
+        "environmentVariables",
+        "groups",
+        "excludedGroups",
+        "forkCount",
+        "parallel",
+        "reuseForks",
+        "properties",
+        "dependenciesToScan",
+        "additionalClasspathElements",
+        "test",
+    ] {
         if child(conf, k).is_some() {
             cfg.ignored.push(k.to_string());
         }
@@ -203,7 +258,11 @@ pub struct CompilerCfg {
 
 fn parse_compiler(root: Node) -> Option<CompilerCfg> {
     let conf = plugin_config(root, "maven-compiler-plugin")??;
-    Some(CompilerCfg { release: text(conf, "release"), source: text(conf, "source"), target: text(conf, "target") })
+    Some(CompilerCfg {
+        release: text(conf, "release"),
+        source: text(conf, "source"),
+        target: text(conf, "target"),
+    })
 }
 
 /// What rayvn understands of `maven-shade-plugin`: fat jar, its name and attachment, services merge,
@@ -236,7 +295,11 @@ pub struct ShadeCfg {
 
 /// True if `version` is a dotted number lower than `than`; anything unparsable is not older.
 pub(crate) fn version_older_than(version: &str, than: &str) -> bool {
-    let parts = |v: &str| v.split('.').map(|p| p.parse::<u32>().ok()).collect::<Option<Vec<_>>>();
+    let parts = |v: &str| {
+        v.split('.')
+            .map(|p| p.parse::<u32>().ok())
+            .collect::<Option<Vec<_>>>()
+    };
     matches!((parts(version), parts(than)), (Some(a), Some(b)) if a < b)
 }
 
@@ -250,24 +313,50 @@ fn plugin_version(root: Node, artifact: &str) -> Option<String> {
 
 fn parse_shade(root: Node) -> Option<ShadeCfg> {
     let conf = plugin_config(root, "maven-shade-plugin")?;
-    let mut cfg = ShadeCfg::default();
-    cfg.services_keep_comments = plugin_version(root, "maven-shade-plugin").is_some_and(|v| version_older_than(&v, "3.4.1"));
+    let mut cfg = ShadeCfg {
+        services_keep_comments: plugin_version(root, "maven-shade-plugin")
+            .is_some_and(|v| version_older_than(&v, "3.4.1")),
+        ..Default::default()
+    };
     let Some(conf) = conf else { return Some(cfg) };
-    for t in child(conf, "transformers").into_iter().flat_map(|t| t.children().filter(|c| c.is_element())) {
-        match t.attribute("implementation").unwrap_or("").rsplit('.').next().unwrap_or("") {
+    for t in child(conf, "transformers")
+        .into_iter()
+        .flat_map(|t| t.children().filter(|c| c.is_element()))
+    {
+        match t
+            .attribute("implementation")
+            .unwrap_or("")
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+        {
             "ServicesResourceTransformer" => cfg.services = true,
             "ManifestResourceTransformer" => {
                 cfg.main_class = text(t, "mainClass");
                 if let Some(m) = child(t, "manifestEntries") {
-                    cfg.manifest.extend(m.children().filter(|c| c.is_element()).map(|c| (c.tag_name().name().to_string(), node_text(c))));
+                    cfg.manifest.extend(
+                        m.children()
+                            .filter(|c| c.is_element())
+                            .map(|c| (c.tag_name().name().to_string(), node_text(c))),
+                    );
                 }
             }
             other => cfg.ignored.push(format!("transformer {other}")),
         }
     }
-    for f in child(conf, "filters").into_iter().flat_map(|f| f.children().filter(|c| c.is_element())) {
+    for f in child(conf, "filters")
+        .into_iter()
+        .flat_map(|f| f.children().filter(|c| c.is_element()))
+    {
         let art = text(f, "artifact").unwrap_or_else(|| "*:*".into());
-        let ex: Vec<String> = child(f, "excludes").map(|e| e.children().filter(|c| c.is_element()).map(node_text).collect()).unwrap_or_default();
+        let ex: Vec<String> = child(f, "excludes")
+            .map(|e| {
+                e.children()
+                    .filter(|c| c.is_element())
+                    .map(node_text)
+                    .collect()
+            })
+            .unwrap_or_default();
         if child(f, "includes").is_some() {
             cfg.ignored.push("filter <includes>".into());
         }
@@ -295,7 +384,6 @@ struct Activation {
 
 #[derive(Clone, Debug, Default)]
 struct Profile {
-    id: String,
     activation: Option<Activation>,
     props: BTreeMap<String, String>,
     managed: Vec<Dep>,
@@ -310,12 +398,18 @@ pub struct ParentRef {
 }
 
 pub fn child<'a, 'i>(n: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
-    n.children().find(|c| c.is_element() && c.tag_name().name() == name)
+    n.children()
+        .find(|c| c.is_element() && c.tag_name().name() == name)
 }
 
 /// All text directly inside `n`, ignoring comments (`<version><!-- x -->1.0</version>`).
 fn node_text(n: Node) -> String {
-    n.children().filter(|c| c.is_text()).filter_map(|c| c.text()).collect::<String>().trim().to_string()
+    n.children()
+        .filter(|c| c.is_text())
+        .filter_map(|c| c.text())
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 pub fn text(n: Node, name: &str) -> Option<String> {
@@ -344,18 +438,38 @@ fn parse_dep(n: Node) -> Option<Dep> {
 }
 
 fn parse_deps(n: Option<Node>) -> Vec<Dep> {
-    n.map(|d| d.children().filter(|c| c.is_element()).filter_map(parse_dep).collect())
-        .unwrap_or_default()
+    n.map(|d| {
+        d.children()
+            .filter(|c| c.is_element())
+            .filter_map(parse_dep)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn parse_props(n: Option<Node>) -> BTreeMap<String, String> {
-    n.map(|p| p.children().filter(|c| c.is_element()).map(|c| (c.tag_name().name().to_string(), node_text(c))).collect())
-        .unwrap_or_default()
+    n.map(|p| {
+        p.children()
+            .filter(|c| c.is_element())
+            .map(|c| (c.tag_name().name().to_string(), node_text(c)))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn parse_repos(n: Option<Node>) -> Vec<RepoDecl> {
-    n.map(|r| r.children().filter(|c| c.is_element()).filter_map(|x| Some(RepoDecl { id: text(x, "id")?, url: text(x, "url")? })).collect())
-        .unwrap_or_default()
+    n.map(|r| {
+        r.children()
+            .filter(|c| c.is_element())
+            .filter_map(|x| {
+                Some(RepoDecl {
+                    id: text(x, "id")?,
+                    url: text(x, "url")?,
+                })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn parse_profile(n: Node) -> Profile {
@@ -364,14 +478,20 @@ fn parse_profile(n: Node) -> Profile {
         jdk: text(a, "jdk"),
         property: child(a, "property").and_then(|p| Some((text(p, "name")?, text(p, "value")))),
         os: child(a, "os")
-            .map(|o| ["name", "family", "arch", "version"].iter().filter_map(|k| Some((k.to_string(), text(o, k)?))).collect())
+            .map(|o| {
+                ["name", "family", "arch", "version"]
+                    .iter()
+                    .filter_map(|k| Some((k.to_string(), text(o, k)?)))
+                    .collect()
+            })
             .unwrap_or_default(),
     });
     Profile {
-        id: text(n, "id").unwrap_or_default(),
         activation,
         props: parse_props(child(n, "properties")),
-        managed: parse_deps(child(n, "dependencyManagement").and_then(|d| child(d, "dependencies"))),
+        managed: parse_deps(
+            child(n, "dependencyManagement").and_then(|d| child(d, "dependencies")),
+        ),
         deps: parse_deps(child(n, "dependencies")),
         repos: parse_repos(child(n, "repositories")),
     }
@@ -380,19 +500,28 @@ fn parse_profile(n: Node) -> Profile {
 /// Activate profiles the way Maven does: any profile whose explicit condition holds; if none do,
 /// the `activeByDefault` ones. Conditions rayvn cannot evaluate (`file`, `-P`, `-D`) count as inactive.
 fn active(profiles: &[Profile]) -> Vec<&Profile> {
-    let explicit: Vec<&Profile> = profiles.iter().filter(|p| p.activation.as_ref().is_some_and(explicit_match)).collect();
+    let explicit: Vec<&Profile> = profiles
+        .iter()
+        .filter(|p| p.activation.as_ref().is_some_and(explicit_match))
+        .collect();
     if !explicit.is_empty() {
         return explicit;
     }
-    profiles.iter().filter(|p| p.activation.as_ref().is_some_and(|a| a.by_default)).collect()
+    profiles
+        .iter()
+        .filter(|p| p.activation.as_ref().is_some_and(|a| a.by_default))
+        .collect()
 }
 
 fn explicit_match(a: &Activation) -> bool {
-    let conditions = a.jdk.is_some() as usize + a.property.is_some() as usize + !a.os.is_empty() as usize;
+    let conditions =
+        a.jdk.is_some() as usize + a.property.is_some() as usize + !a.os.is_empty() as usize;
     if conditions == 0 {
         return false;
     }
-    a.jdk.as_deref().is_none_or(jdk_matches) && a.property.as_ref().is_none_or(property_matches) && (a.os.is_empty() || os_matches(&a.os))
+    a.jdk.as_deref().is_none_or(jdk_matches)
+        && a.property.as_ref().is_none_or(property_matches)
+        && (a.os.is_empty() || os_matches(&a.os))
 }
 
 /// rayvn has no `-D` yet, so no property is ever set: `!name` holds, and so does `name` with a negated value
@@ -407,13 +536,27 @@ fn os_matches(os: &[(String, String)]) -> bool {
         "linux" => ("linux", "unix", "amd64"),
         _ => ("windows", "windows", "amd64"),
     };
-    let arch = if std::env::consts::ARCH == "x86_64" { "amd64" } else if std::env::consts::ARCH == "aarch64" { "aarch64" } else { arch };
+    let arch = if std::env::consts::ARCH == "x86_64" {
+        "amd64"
+    } else if std::env::consts::ARCH == "aarch64" {
+        "aarch64"
+    } else {
+        arch
+    };
     os.iter().all(|(k, v)| {
-        let (neg, v) = v.strip_prefix('!').map(|x| (true, x)).unwrap_or((false, v.as_str()));
+        let (neg, v) = v
+            .strip_prefix('!')
+            .map(|x| (true, x))
+            .unwrap_or((false, v.as_str()));
         let hit = match k.as_str() {
             "name" => v.eq_ignore_ascii_case(name),
-            "family" => v.eq_ignore_ascii_case(family) || (v.eq_ignore_ascii_case("unix") && family == "mac"),
-            "arch" => v.eq_ignore_ascii_case(arch) || v.eq_ignore_ascii_case(std::env::consts::ARCH),
+            "family" => {
+                v.eq_ignore_ascii_case(family)
+                    || (v.eq_ignore_ascii_case("unix") && family == "mac")
+            }
+            "arch" => {
+                v.eq_ignore_ascii_case(arch) || v.eq_ignore_ascii_case(std::env::consts::ARCH)
+            }
             _ => true,
         };
         hit != neg
@@ -424,23 +567,38 @@ fn os_matches(os: &[(String, String)]) -> bool {
 fn java_major() -> Option<u32> {
     static V: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        let from_release = std::env::var("JAVA_HOME").ok().and_then(|h| std::fs::read_to_string(format!("{h}/release")).ok()).and_then(|r| {
-            r.lines().find_map(|l| l.strip_prefix("JAVA_VERSION=").map(|v| v.trim_matches('"').to_string()))
-        });
+        let from_release = std::env::var("JAVA_HOME")
+            .ok()
+            .and_then(|h| std::fs::read_to_string(format!("{h}/release")).ok())
+            .and_then(|r| {
+                r.lines().find_map(|l| {
+                    l.strip_prefix("JAVA_VERSION=")
+                        .map(|v| v.trim_matches('"').to_string())
+                })
+            });
         let ver = from_release.or_else(|| {
-            let out = std::process::Command::new("java").arg("-version").output().ok()?;
+            let out = std::process::Command::new("java")
+                .arg("-version")
+                .output()
+                .ok()?;
             let text = String::from_utf8_lossy(&out.stderr).to_string();
             text.split('"').nth(1).map(str::to_string)
         })?;
         let mut parts = ver.split(['.', '-', '_', '+']);
         let first: u32 = parts.next()?.parse().ok()?;
-        Some(if first == 1 { parts.next()?.parse().ok()? } else { first })
+        Some(if first == 1 {
+            parts.next()?.parse().ok()?
+        } else {
+            first
+        })
     })
 }
 
 /// `<jdk>`: a version prefix (`1.8`, `17`), a negated prefix (`!1.8`), or a range (`[1.8,)`).
 fn jdk_matches(spec: &str) -> bool {
-    let Some(cur) = java_major() else { return false };
+    let Some(cur) = java_major() else {
+        return false;
+    };
     let norm = |v: &str| -> Option<u32> {
         let mut p = v.trim().split('.');
         let a: u32 = p.next()?.parse().ok()?;
@@ -453,8 +611,10 @@ fn jdk_matches(spec: &str) -> bool {
         let (lo_incl, hi_incl) = (spec.starts_with('['), spec.ends_with(']'));
         let inner = &spec[1..spec.len() - 1];
         let (lo, hi) = inner.split_once(',').unwrap_or((inner, inner));
-        let lo_ok = lo.trim().is_empty() || norm(lo).is_some_and(|l| if lo_incl { cur >= l } else { cur > l });
-        let hi_ok = hi.trim().is_empty() || norm(hi).is_some_and(|h| if hi_incl { cur <= h } else { cur < h });
+        let lo_ok = lo.trim().is_empty()
+            || norm(lo).is_some_and(|l| if lo_incl { cur >= l } else { cur > l });
+        let hi_ok = hi.trim().is_empty()
+            || norm(hi).is_some_and(|h| if hi_incl { cur <= h } else { cur < h });
         return lo_ok && hi_ok;
     }
     norm(spec) == Some(cur)
@@ -493,13 +653,20 @@ pub fn parse(xml: &str) -> Result<RawPom> {
 }
 
 fn parse_raw(xml: &str) -> Result<RawPom> {
-    let opts = ParsingOptions { allow_dtd: true, ..Default::default() };
+    let opts = ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
     let doc = Document::parse_with_options(xml, opts).context("invalid pom xml")?;
     let root = doc.root_element();
 
     let parent = child(root, "parent").and_then(|p| {
         Some(ParentRef {
-            gav: Gav::new(&text(p, "groupId")?, &text(p, "artifactId")?, &text(p, "version")?),
+            gav: Gav::new(
+                &text(p, "groupId")?,
+                &text(p, "artifactId")?,
+                &text(p, "version")?,
+            ),
             relative_path: child(p, "relativePath").map(|r| node_text(r)),
         })
     });
@@ -524,19 +691,32 @@ fn parse_raw(xml: &str) -> Result<RawPom> {
         version: text(root, "version"),
         packaging: text(root, "packaging").unwrap_or_else(|| "jar".into()),
         props,
-        managed: parse_deps(child(root, "dependencyManagement").and_then(|d| child(d, "dependencies"))),
+        managed: parse_deps(
+            child(root, "dependencyManagement").and_then(|d| child(d, "dependencies")),
+        ),
         deps: parse_deps(child(root, "dependencies")),
         repos,
         modules,
         relocation: child(root, "distributionManagement")
             .and_then(|d| child(d, "relocation"))
-            .map(|r| Relocation { group: text(r, "groupId"), artifact: text(r, "artifactId"), version: text(r, "version") }),
+            .map(|r| Relocation {
+                group: text(r, "groupId"),
+                artifact: text(r, "artifactId"),
+                version: text(r, "version"),
+            }),
         shade: parse_shade(root),
         compiler: parse_compiler(root),
         surefire: parse_tests(root, "maven-surefire-plugin"),
         failsafe: parse_tests(root, "maven-failsafe-plugin"),
         unrun: parse_unrun(root),
-        profiles: child(root, "profiles").map(|p| p.children().filter(|c| c.is_element()).map(parse_profile).collect()).unwrap_or_default(),
+        profiles: child(root, "profiles")
+            .map(|p| {
+                p.children()
+                    .filter(|c| c.is_element())
+                    .map(parse_profile)
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -557,19 +737,39 @@ mod tests {
     }
 
     fn plugin(artifact: &str, executions: &str) -> String {
-        format!("<plugin><artifactId>{artifact}</artifactId><executions>{executions}</executions></plugin>")
+        format!(
+            "<plugin><artifactId>{artifact}</artifactId><executions>{executions}</executions></plugin>"
+        )
     }
 
     #[test]
     fn a_phase_bound_execution_of_a_plugin_rayvn_does_not_run_is_reported() {
-        let exec = plugin("exec-maven-plugin", "<execution><phase>generate-sources</phase><goals><goal>exec</goal><goal>java</goal></goals></execution>");
-        assert_eq!(unrun_of(&exec), ["exec-maven-plugin (exec, java at generate-sources)"]);
+        let exec = plugin(
+            "exec-maven-plugin",
+            "<execution><phase>generate-sources</phase><goals><goal>exec</goal><goal>java</goal></goals></execution>",
+        );
+        assert_eq!(
+            unrun_of(&exec),
+            ["exec-maven-plugin (exec, java at generate-sources)"]
+        );
     }
 
     #[test]
     fn an_execution_without_a_phase_or_goals_is_still_reported() {
-        assert_eq!(unrun_of(&plugin("x-plugin", "<execution><goals><goal>g</goal></goals></execution>")), ["x-plugin (g)"]);
-        assert_eq!(unrun_of(&plugin("x-plugin", "<execution><phase>package</phase></execution>")), ["x-plugin (default goals at package)"]);
+        assert_eq!(
+            unrun_of(&plugin(
+                "x-plugin",
+                "<execution><goals><goal>g</goal></goals></execution>"
+            )),
+            ["x-plugin (g)"]
+        );
+        assert_eq!(
+            unrun_of(&plugin(
+                "x-plugin",
+                "<execution><phase>package</phase></execution>"
+            )),
+            ["x-plugin (default goals at package)"]
+        );
     }
 
     #[test]
@@ -580,46 +780,134 @@ mod tests {
 
     #[test]
     fn an_execution_bound_to_phase_none_does_not_run() {
-        assert!(unrun_of(&plugin("x-plugin", "<execution><phase>none</phase><goals><goal>g</goal></goals></execution>")).is_empty());
+        assert!(
+            unrun_of(&plugin(
+                "x-plugin",
+                "<execution><phase>none</phase><goals><goal>g</goal></goals></execution>"
+            ))
+            .is_empty()
+        );
     }
 
     #[test]
     fn plugins_rayvn_handles_are_not_reported() {
-        for p in ["maven-shade-plugin", "maven-failsafe-plugin", "maven-compiler-plugin", "maven-install-plugin"] {
-            assert!(unrun_of(&plugin(p, "<execution><phase>package</phase><goals><goal>g</goal></goals></execution>")).is_empty(), "{p}");
+        for p in [
+            "maven-shade-plugin",
+            "maven-failsafe-plugin",
+            "maven-compiler-plugin",
+            "maven-install-plugin",
+        ] {
+            assert!(
+                unrun_of(&plugin(
+                    p,
+                    "<execution><phase>package</phase><goals><goal>g</goal></goals></execution>"
+                ))
+                .is_empty(),
+                "{p}"
+            );
         }
     }
 
     #[test]
     fn an_os_profile_with_a_not_true_property_applies_because_the_property_is_unset() {
-        let here = if std::env::consts::OS == "macos" { "mac os x" } else if std::env::consts::OS == "linux" { "linux" } else { "windows" };
-        assert_eq!(parse(&javafx_style(here, "here")).unwrap().props.get("javafx.platform").map(String::as_str), Some("here"));
-        assert!(parse(&javafx_style("plan9", "there")).unwrap().props.is_empty());
+        let here = if std::env::consts::OS == "macos" {
+            "mac os x"
+        } else if std::env::consts::OS == "linux" {
+            "linux"
+        } else {
+            "windows"
+        };
+        assert_eq!(
+            parse(&javafx_style(here, "here"))
+                .unwrap()
+                .props
+                .get("javafx.platform")
+                .map(String::as_str),
+            Some("here")
+        );
+        assert!(
+            parse(&javafx_style("plan9", "there"))
+                .unwrap()
+                .props
+                .is_empty()
+        );
     }
 
     #[test]
     fn shade_3_4_0_and_older_keep_service_comments() {
-        let pom = |v: &str| format!("<project><artifactId>a</artifactId><build><plugins><plugin><artifactId>maven-shade-plugin</artifactId><version>{v}</version></plugin></plugins></build></project>");
-        assert!(parse(&pom("3.4.0")).unwrap().shade.unwrap().services_keep_comments);
-        assert!(parse(&pom("3.2.4")).unwrap().shade.unwrap().services_keep_comments);
-        assert!(!parse(&pom("3.4.1")).unwrap().shade.unwrap().services_keep_comments);
-        assert!(!parse(&pom("3.10.0")).unwrap().shade.unwrap().services_keep_comments);
-        assert!(!parse(&pom("${shade.version}")).unwrap().shade.unwrap().services_keep_comments);
+        let pom = |v: &str| {
+            format!(
+                "<project><artifactId>a</artifactId><build><plugins><plugin><artifactId>maven-shade-plugin</artifactId><version>{v}</version></plugin></plugins></build></project>"
+            )
+        };
+        assert!(
+            parse(&pom("3.4.0"))
+                .unwrap()
+                .shade
+                .unwrap()
+                .services_keep_comments
+        );
+        assert!(
+            parse(&pom("3.2.4"))
+                .unwrap()
+                .shade
+                .unwrap()
+                .services_keep_comments
+        );
+        assert!(
+            !parse(&pom("3.4.1"))
+                .unwrap()
+                .shade
+                .unwrap()
+                .services_keep_comments
+        );
+        assert!(
+            !parse(&pom("3.10.0"))
+                .unwrap()
+                .shade
+                .unwrap()
+                .services_keep_comments
+        );
+        assert!(
+            !parse(&pom("${shade.version}"))
+                .unwrap()
+                .shade
+                .unwrap()
+                .services_keep_comments
+        );
     }
 
     #[test]
     fn a_property_that_must_be_set_never_holds_without_dash_d() {
-        for (name, value) in [("x", None), ("x", Some("true")), ("!x", None), ("x", Some("!true"))] {
+        for (name, value) in [
+            ("x", None),
+            ("x", Some("true")),
+            ("!x", None),
+            ("x", Some("!true")),
+        ] {
             let held = property_matches(&(name.to_string(), value.map(String::from)));
-            assert_eq!(held, name.starts_with('!') || value.is_some_and(|v| v.starts_with('!')), "{name} {value:?}");
+            assert_eq!(
+                held,
+                name.starts_with('!') || value.is_some_and(|v| v.starts_with('!')),
+                "{name} {value:?}"
+            );
         }
     }
 
     #[test]
     fn a_relocation_is_read_from_distribution_management() {
         let moved = parse("<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version><distributionManagement><relocation><groupId>new</groupId></relocation></distributionManagement></project>").unwrap();
-        assert_eq!(moved.relocation, Some(Relocation { group: Some("new".into()), ..Default::default() }));
-        let plain = parse("<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version></project>").unwrap();
+        assert_eq!(
+            moved.relocation,
+            Some(Relocation {
+                group: Some("new".into()),
+                ..Default::default()
+            })
+        );
+        let plain = parse(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version></project>",
+        )
+        .unwrap();
         assert_eq!(plain.relocation, None);
     }
 }

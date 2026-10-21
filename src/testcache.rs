@@ -48,7 +48,10 @@ pub fn hash_tree(dir: &Path) -> Result<Vec<(String, String)>> {
         .par_iter()
         .map(|f| {
             let rel = f.strip_prefix(dir)?.to_string_lossy().replace('\\', "/");
-            Ok((rel, hash_bytes(&std::fs::read(f).with_context(|| f.display().to_string())?)))
+            Ok((
+                rel,
+                hash_bytes(&std::fs::read(f).with_context(|| f.display().to_string())?),
+            ))
         })
         .collect()
 }
@@ -65,10 +68,19 @@ pub fn hash_declared(root: &Path, globs: &[String]) -> Result<Vec<(String, Strin
 
 fn hash_tree_skipping(root: &Path, skip: &[&str]) -> Result<Vec<(String, String)>> {
     let mut files = vec![];
-    crate::build::walk_filtered(root, &|p| p.file_name().is_some_and(|n| skip.iter().any(|s| n == *s)), &mut files)?;
+    crate::build::walk_filtered(
+        root,
+        &|p| p.file_name().is_some_and(|n| skip.iter().any(|s| n == *s)),
+        &mut files,
+    )?;
     files
         .par_iter()
-        .map(|f| Ok((f.strip_prefix(root)?.to_string_lossy().replace('\\', "/"), hash_bytes(&std::fs::read(f)?))))
+        .map(|f| {
+            Ok((
+                f.strip_prefix(root)?.to_string_lossy().replace('\\', "/"),
+                hash_bytes(&std::fs::read(f)?),
+            ))
+        })
         .collect()
 }
 
@@ -80,19 +92,35 @@ pub struct Summary {
     pub failed: usize,
 }
 
-impl Summary {
-    pub fn add(self, o: Summary) -> Summary {
-        Summary { found: self.found + o.found, successful: self.successful + o.successful, failed: self.failed + o.failed }
+impl std::ops::Add for Summary {
+    type Output = Summary;
+
+    fn add(self, o: Summary) -> Summary {
+        Summary {
+            found: self.found + o.found,
+            successful: self.successful + o.successful,
+            failed: self.failed + o.failed,
+        }
     }
 }
 
 /// Reads `[   15 tests found   ]`-style lines out of the launcher's output; `None` if there is no summary.
 pub fn parse_summary(output: &str) -> Option<Summary> {
     let count = |label: &str| -> Option<usize> {
-        let line = output.lines().find(|l| l.trim_start().starts_with('[') && l.contains(label))?;
-        line.trim_start_matches(|c: char| c == '[' || c.is_whitespace()).split_whitespace().next()?.parse().ok()
+        let line = output
+            .lines()
+            .find(|l| l.trim_start().starts_with('[') && l.contains(label))?;
+        line.trim_start_matches(|c: char| c == '[' || c.is_whitespace())
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
     };
-    Some(Summary { found: count("tests found")?, successful: count("tests successful")?, failed: count("tests failed")? })
+    Some(Summary {
+        found: count("tests found")?,
+        successful: count("tests successful")?,
+        failed: count("tests failed")?,
+    })
 }
 
 /// Splits `classes` into at most `n` shards, dealing them out in sorted order so that shards are stable
@@ -118,10 +146,23 @@ pub struct Outcome {
 
 /// Runs every shard through `exec` in parallel and combines the results: success only if all succeeded;
 /// the summary is the sum, or `None` if any shard printed none. The first error aborts.
-pub fn run_shards(shards: &[Vec<String>], exec: impl Fn(usize, &[String]) -> Result<Outcome> + Sync) -> Result<Outcome> {
-    let outcomes: Vec<Outcome> = shards.par_iter().enumerate().map(|(i, s)| exec(i, s)).collect::<Result<_>>()?;
-    let summary = outcomes.iter().map(|o| o.summary).try_fold(Summary::default(), |acc, s| s.map(|s| acc.add(s)));
-    Ok(Outcome { success: outcomes.iter().all(|o| o.success), summary })
+pub fn run_shards(
+    shards: &[Vec<String>],
+    exec: impl Fn(usize, &[String]) -> Result<Outcome> + Sync,
+) -> Result<Outcome> {
+    let outcomes: Vec<Outcome> = shards
+        .par_iter()
+        .enumerate()
+        .map(|(i, s)| exec(i, s))
+        .collect::<Result<_>>()?;
+    let summary = outcomes
+        .iter()
+        .map(|o| o.summary)
+        .try_fold(Summary::default(), |acc, s| s.map(|s| acc + s));
+    Ok(Outcome {
+        success: outcomes.iter().all(|o| o.success),
+        summary,
+    })
 }
 
 /// A stored pass.
@@ -137,7 +178,8 @@ fn record_path(store: &Path, name: &str) -> PathBuf {
 
 /// The record stored under `name` if its key is `key`.
 pub fn lookup(store: &Path, name: &str, key: &str) -> Option<Record> {
-    let rec: Record = toml::from_str(&std::fs::read_to_string(record_path(store, name)).ok()?).ok()?;
+    let rec: Record =
+        toml::from_str(&std::fs::read_to_string(record_path(store, name)).ok()?).ok()?;
     (rec.key == key).then_some(rec)
 }
 
@@ -169,15 +211,26 @@ pub enum Verdict {
 
 /// Runs `exec` unless `use_cache` and the stored record matches `key`. A passing run with a summary is stored;
 /// a failing run (or one without a summary to report) removes the record.
-pub fn run_cached(store: &Path, name: &str, key: &str, use_cache: bool, exec: impl FnOnce() -> Result<Outcome>) -> Result<Verdict> {
-    if use_cache {
-        if let Some(rec) = lookup(store, name, key) {
-            return Ok(Verdict::Cached(rec));
-        }
+pub fn run_cached(
+    store: &Path,
+    name: &str,
+    key: &str,
+    use_cache: bool,
+    exec: impl FnOnce() -> Result<Outcome>,
+) -> Result<Verdict> {
+    if use_cache && let Some(rec) = lookup(store, name, key) {
+        return Ok(Verdict::Cached(rec));
     }
     let outcome = exec()?;
     match (outcome.success, outcome.summary) {
-        (true, Some(summary)) => save(store, name, &Record { key: key.into(), summary })?,
+        (true, Some(summary)) => save(
+            store,
+            name,
+            &Record {
+                key: key.into(),
+                summary,
+            },
+        )?,
         _ => forget(store, name),
     }
     Ok(Verdict::Ran(outcome))
@@ -210,7 +263,14 @@ mod tests {
     }
 
     fn pass(n: usize) -> Outcome {
-        Outcome { success: true, summary: Some(Summary { found: n, successful: n, failed: 0 }) }
+        Outcome {
+            success: true,
+            summary: Some(Summary {
+                found: n,
+                successful: n,
+                failed: 0,
+            }),
+        }
     }
 
     #[test]
@@ -244,32 +304,67 @@ mod tests {
 
     #[test]
     fn key_does_not_confuse_a_jar_with_a_file_of_the_same_text() {
-        let a = KeyInputs { jars: vec![pair("p", "h")], ..Default::default() };
-        let b = KeyInputs { files: vec![pair("p", "h")], ..Default::default() };
+        let a = KeyInputs {
+            jars: vec![pair("p", "h")],
+            ..Default::default()
+        };
+        let b = KeyInputs {
+            files: vec![pair("p", "h")],
+            ..Default::default()
+        };
         assert_ne!(key(&a), key(&b));
     }
 
     #[test]
     fn summary_is_read_from_the_launcher_table() {
         let out = "noise\n[        12 containers found      ]\n[        15 tests found           ]\n[        14 tests successful      ]\n[         1 tests failed          ]\n";
-        assert_eq!(parse_summary(out), Some(Summary { found: 15, successful: 14, failed: 1 }));
+        assert_eq!(
+            parse_summary(out),
+            Some(Summary {
+                found: 15,
+                successful: 14,
+                failed: 1
+            })
+        );
         assert_eq!(parse_summary("no table here"), None);
-        assert_eq!(parse_summary("[ 3 tests found ]"), None, "a partial table is not a summary");
+        assert_eq!(
+            parse_summary("[ 3 tests found ]"),
+            None,
+            "a partial table is not a summary"
+        );
     }
 
     #[test]
     fn summaries_add_up() {
-        let s = Summary { found: 3, successful: 2, failed: 1 };
-        assert_eq!(s.add(s), Summary { found: 6, successful: 4, failed: 2 });
+        let s = Summary {
+            found: 3,
+            successful: 2,
+            failed: 1,
+        };
+        assert_eq!(
+            s + s,
+            Summary {
+                found: 6,
+                successful: 4,
+                failed: 2
+            }
+        );
     }
 
     #[test]
     fn shards_are_stable_balanced_and_never_empty() {
         let classes: Vec<String> = ["d", "a", "c", "b", "e"].map(String::from).to_vec();
-        assert_eq!(split_shards(&classes, 2), [vec!["a", "c", "e"], vec!["b", "d"]]);
+        assert_eq!(
+            split_shards(&classes, 2),
+            [vec!["a", "c", "e"], vec!["b", "d"]]
+        );
         assert_eq!(split_shards(&classes, 1), [vec!["a", "b", "c", "d", "e"]]);
         assert_eq!(split_shards(&classes, 0).len(), 1, "zero shards means one");
-        assert_eq!(split_shards(&classes[..2], 8).len(), 2, "no more shards than classes");
+        assert_eq!(
+            split_shards(&classes[..2], 8).len(),
+            2,
+            "no more shards than classes"
+        );
         assert!(split_shards(&[], 4).is_empty());
     }
 
@@ -278,8 +373,24 @@ mod tests {
         let shards = split_shards(&["a".into(), "b".into(), "c".into()], 2);
         let all = run_shards(&shards, |_, s| Ok(pass(s.len()))).unwrap();
         assert_eq!(all, pass(3));
-        let one_fails = run_shards(&shards, |i, _| Ok(if i == 1 { Outcome { success: false, summary: None } } else { pass(2) })).unwrap();
-        assert_eq!(one_fails, Outcome { success: false, summary: None });
+        let one_fails = run_shards(&shards, |i, _| {
+            Ok(if i == 1 {
+                Outcome {
+                    success: false,
+                    summary: None,
+                }
+            } else {
+                pass(2)
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            one_fails,
+            Outcome {
+                success: false,
+                summary: None
+            }
+        );
         assert!(run_shards(&shards, |_, _| anyhow::bail!("jvm missing")).is_err());
     }
 
@@ -295,10 +406,28 @@ mod tests {
             .unwrap()
         };
         assert_eq!(go("k1", true), Verdict::Ran(pass(4)));
-        assert_eq!(go("k1", true), Verdict::Cached(Record { key: "k1".into(), summary: Summary { found: 4, successful: 4, failed: 0 } }));
+        assert_eq!(
+            go("k1", true),
+            Verdict::Cached(Record {
+                key: "k1".into(),
+                summary: Summary {
+                    found: 4,
+                    successful: 4,
+                    failed: 0
+                }
+            })
+        );
         assert_eq!(runs.get(), 1);
-        assert_eq!(go("k2", true), Verdict::Ran(pass(4)), "another key runs again");
-        assert_eq!(go("k2", false), Verdict::Ran(pass(4)), "rerun ignores the cache");
+        assert_eq!(
+            go("k2", true),
+            Verdict::Ran(pass(4)),
+            "another key runs again"
+        );
+        assert_eq!(
+            go("k2", false),
+            Verdict::Ran(pass(4)),
+            "rerun ignores the cache"
+        );
         assert_eq!(runs.get(), 3);
     }
 
@@ -306,15 +435,32 @@ mod tests {
     fn a_failure_is_never_stored_and_removes_the_old_pass() {
         let d = dir("fail");
         run_cached(&d, "unit", "k", true, || Ok(pass(1))).unwrap();
-        let fail = || Ok(Outcome { success: false, summary: Some(Summary { found: 1, successful: 0, failed: 1 }) });
-        assert!(matches!(run_cached(&d, "unit", "k", false, fail).unwrap(), Verdict::Ran(o) if !o.success));
+        let fail = || {
+            Ok(Outcome {
+                success: false,
+                summary: Some(Summary {
+                    found: 1,
+                    successful: 0,
+                    failed: 1,
+                }),
+            })
+        };
+        assert!(
+            matches!(run_cached(&d, "unit", "k", false, fail).unwrap(), Verdict::Ran(o) if !o.success)
+        );
         assert_eq!(lookup(&d, "unit", "k"), None);
     }
 
     #[test]
     fn a_pass_without_a_summary_is_not_cached() {
         let d = dir("nosummary");
-        run_cached(&d, "unit", "k", true, || Ok(Outcome { success: true, summary: None })).unwrap();
+        run_cached(&d, "unit", "k", true, || {
+            Ok(Outcome {
+                success: true,
+                summary: None,
+            })
+        })
+        .unwrap();
         assert_eq!(lookup(&d, "unit", "k"), None);
     }
 
@@ -329,10 +475,16 @@ mod tests {
     #[test]
     fn saving_leaves_no_temporary_file_and_replaces_the_old_record() {
         let d = dir("atomic");
-        let rec = |k: &str| Record { key: k.into(), summary: Summary::default() };
+        let rec = |k: &str| Record {
+            key: k.into(),
+            summary: Summary::default(),
+        };
         save(&d, "unit", &rec("one")).unwrap();
         save(&d, "unit", &rec("two")).unwrap();
-        let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let names: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
         assert_eq!(names, ["unit.toml"]);
         assert_eq!(lookup(&d, "unit", "two"), Some(rec("two")));
         assert_eq!(lookup(&d, "unit", "one"), None);
@@ -360,11 +512,20 @@ mod tests {
     #[test]
     fn declared_inputs_match_globs_and_skip_target_and_git() {
         let d = dir("declared");
-        for f in ["test/in/a.csv", "test/in/b.txt", "target/x.csv", ".git/y.csv"] {
+        for f in [
+            "test/in/a.csv",
+            "test/in/b.txt",
+            "target/x.csv",
+            ".git/y.csv",
+        ] {
             std::fs::create_dir_all(d.join(f).parent().unwrap()).unwrap();
             std::fs::write(d.join(f), f).unwrap();
         }
-        let names: Vec<String> = hash_declared(&d, &["**/*.csv".into()]).unwrap().into_iter().map(|(p, _)| p).collect();
+        let names: Vec<String> = hash_declared(&d, &["**/*.csv".into()])
+            .unwrap()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
         assert_eq!(names, ["test/in/a.csv"]);
         assert!(hash_declared(&d, &[]).unwrap().is_empty());
     }

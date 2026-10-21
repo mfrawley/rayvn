@@ -1,0 +1,3 @@
+#!/bin/sh
+# Enable with: git config core.hooksPath .githooks
+exec sh "$(git rev-parse --show-toplevel)/scripts/check.sh"

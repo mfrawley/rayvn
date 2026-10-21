@@ -49,7 +49,8 @@ struct Node {
 }
 
 fn excluded(ex: &[(String, String)], d: &Dep) -> bool {
-    ex.iter().any(|(g, a)| (g == "*" || *g == d.group) && (a == "*" || *a == d.artifact))
+    ex.iter()
+        .any(|(g, a)| (g == "*" || *g == d.group) && (a == "*" || *a == d.artifact))
 }
 
 /// Scope of a transitive dependency given its parent's scope; `None` means it is dropped. This is the table in
@@ -84,7 +85,9 @@ struct Tree {
 fn merge_scopes<'a>(a: &'a str, b: &'a str) -> &'a str {
     match (a, b) {
         _ if a == b => a,
-        ("compile", _) | (_, "compile") | ("runtime", "provided") | ("provided", "runtime") => "compile",
+        ("compile", _) | (_, "compile") | ("runtime", "provided") | ("provided", "runtime") => {
+            "compile"
+        }
         ("runtime", _) | (_, "runtime") => "runtime",
         ("provided", _) | (_, "provided") => "provided",
         _ => a,
@@ -96,13 +99,18 @@ impl Tree {
     fn admit(&mut self, node: &Node) -> bool {
         let key = node.dep.key();
         if let Some(parent) = &node.parent {
-            self.edges.push((parent.clone(), key.clone(), node.declared.clone()));
+            self.edges
+                .push((parent.clone(), key.clone(), node.declared.clone()));
         }
         if self.chosen.contains_key(&key) {
             return false;
         }
         match &node.parent {
-            Some(parent) => self.children.entry(parent.clone()).or_default().push(key.clone()),
+            Some(parent) => self
+                .children
+                .entry(parent.clone())
+                .or_default()
+                .push(key.clone()),
             None => self.roots.push(key.clone()),
         }
         self.chosen.insert(key, node.clone());
@@ -115,7 +123,9 @@ impl Tree {
         loop {
             let mut changed = false;
             for (parent, child, declared) in &self.edges {
-                let Some(via) = mediate(&self.chosen[parent].scope, declared) else { continue };
+                let Some(via) = mediate(&self.chosen[parent].scope, declared) else {
+                    continue;
+                };
                 let node = &self.chosen[child];
                 if node.parent.is_none() {
                     continue;
@@ -158,7 +168,16 @@ fn root_nodes(deps: &[Dep], include_test: bool) -> Result<Vec<Node>> {
         let Some(version) = d.version.clone() else {
             anyhow::bail!("dependency {}:{} has no version", d.group, d.artifact);
         };
-        nodes.push(Node { dep: d.clone(), version, declared: scope.clone(), scope, depth: 1, via: None, parent: None, exclusions: d.exclusions.clone() });
+        nodes.push(Node {
+            dep: d.clone(),
+            version,
+            declared: scope.clone(),
+            scope,
+            depth: 1,
+            via: None,
+            parent: None,
+            exclusions: d.exclusions.clone(),
+        });
     }
     Ok(nodes)
 }
@@ -166,24 +185,46 @@ fn root_nodes(deps: &[Dep], include_test: bool) -> Result<Vec<Node>> {
 /// Moves `n` to where its POM says the artifact now lives. A version the root manages for the new coordinates wins,
 /// as for any dependency. Returns false when `r` changes nothing.
 fn apply_relocation(n: &mut Node, r: &Relocation, managed: &HashMap<String, Dep>) -> bool {
-    let before = (n.dep.group.clone(), n.dep.artifact.clone(), n.version.clone());
+    let before = (
+        n.dep.group.clone(),
+        n.dep.artifact.clone(),
+        n.version.clone(),
+    );
     n.dep.group = r.group.clone().unwrap_or_else(|| n.dep.group.clone());
     n.dep.artifact = r.artifact.clone().unwrap_or_else(|| n.dep.artifact.clone());
-    n.version = managed.get(&n.dep.key()).and_then(|m| m.version.clone()).or_else(|| r.version.clone()).unwrap_or_else(|| n.version.clone());
-    before != (n.dep.group.clone(), n.dep.artifact.clone(), n.version.clone())
+    n.version = managed
+        .get(&n.dep.key())
+        .and_then(|m| m.version.clone())
+        .or_else(|| r.version.clone())
+        .unwrap_or_else(|| n.version.clone());
+    before
+        != (
+            n.dep.group.clone(),
+            n.dep.artifact.clone(),
+            n.version.clone(),
+        )
 }
 
 /// Follows `<relocation>` from the node's POM until the artifact is where it says it is, as Maven does.
 fn relocated(mut n: Node, loader: &Loader, managed: &HashMap<String, Dep>) -> Result<Node> {
     for _ in 0..MAX_RELOCATIONS {
         let from = Gav::new(&n.dep.group, &n.dep.artifact, &n.version);
-        let Some(r) = loader.load(&from)?.relocation.clone() else { return Ok(n) };
+        let Some(r) = loader.load(&from)?.relocation.clone() else {
+            return Ok(n);
+        };
         if !apply_relocation(&mut n, &r, managed) {
             return Ok(n);
         }
-        eprintln!("warning: {from} has been relocated to {}", Gav::new(&n.dep.group, &n.dep.artifact, &n.version));
+        eprintln!(
+            "warning: {from} has been relocated to {}",
+            Gav::new(&n.dep.group, &n.dep.artifact, &n.version)
+        );
     }
-    anyhow::bail!("{}:{} is relocated more than {MAX_RELOCATIONS} times; is it a loop?", n.dep.group, n.dep.artifact)
+    anyhow::bail!(
+        "{}:{} is relocated more than {MAX_RELOCATIONS} times; is it a loop?",
+        n.dep.group,
+        n.dep.artifact
+    )
 }
 
 const MAX_RELOCATIONS: usize = 10;
@@ -194,14 +235,22 @@ type VersionLister<'a> = &'a (dyn Fn(&str, &str) -> Result<Vec<String>> + Sync);
 /// does the same per dependency, from the repositories' `maven-metadata.xml`.
 fn pinned(mut n: Node, versions: VersionLister) -> Result<Node> {
     let name = format!("{}:{}", n.dep.group, n.dep.artifact);
-    let Some(range) = Constraint::parse(&n.version).with_context(|| format!("dependency {name}"))? else { return Ok(n) };
+    let Some(range) =
+        Constraint::parse(&n.version).with_context(|| format!("dependency {name}"))?
+    else {
+        return Ok(n);
+    };
     if let Some(exact) = range.exact() {
         n.version = exact.to_string();
         return Ok(n);
     }
     let listed = versions(&n.dep.group, &n.dep.artifact)?;
     let Some(best) = range.best(&listed) else {
-        anyhow::bail!("no version of {name} satisfies the range {} ({} versions listed in the repositories)", n.version, listed.len());
+        anyhow::bail!(
+            "no version of {name} satisfies the range {} ({} versions listed in the repositories)",
+            n.version,
+            listed.len()
+        );
     };
     eprintln!("range {name} {} -> {best}", n.version);
     n.version = best;
@@ -209,7 +258,12 @@ fn pinned(mut n: Node, versions: VersionLister) -> Result<Node> {
 }
 
 /// A node as the tree should see it: its range (if any) settled, then relocated.
-fn settled(n: Node, loader: &Loader, managed: &HashMap<String, Dep>, versions: VersionLister) -> Result<Node> {
+fn settled(
+    n: Node,
+    loader: &Loader,
+    managed: &HashMap<String, Dep>,
+    versions: VersionLister,
+) -> Result<Node> {
     relocated(pinned(n, versions)?, loader, managed).and_then(|n| pinned(n, versions))
 }
 
@@ -223,23 +277,48 @@ fn child_nodes(parent: &Node, deps: &[Dep], managed: &HashMap<String, Dep>) -> V
             continue;
         }
         let declared = c.scope.as_deref().unwrap_or("compile");
-        let Some(scope) = mediate(&parent.scope, declared) else { continue };
-        let Some(version) = managed.get(&c.key()).and_then(|m| m.version.clone()).or_else(|| c.version.clone()) else { continue };
+        let Some(scope) = mediate(&parent.scope, declared) else {
+            continue;
+        };
+        let Some(version) = managed
+            .get(&c.key())
+            .and_then(|m| m.version.clone())
+            .or_else(|| c.version.clone())
+        else {
+            continue;
+        };
         let mut exclusions = parent.exclusions.clone();
         exclusions.extend(c.exclusions.iter().cloned());
-        kids.push(Node { dep: c.clone(), version, scope: scope.into(), declared: declared.into(), depth: parent.depth + 1, via: Some(via.clone()), parent: Some(parent.dep.key()), exclusions });
+        kids.push(Node {
+            dep: c.clone(),
+            version,
+            scope: scope.into(),
+            declared: declared.into(),
+            depth: parent.depth + 1,
+            via: Some(via.clone()),
+            parent: Some(parent.dep.key()),
+            exclusions,
+        });
     }
     kids
 }
 
 /// Nearest-wins resolution, level by level; each level's POMs are fetched in parallel.
-pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: bool) -> Result<Vec<Resolved>> {
+pub fn resolve(
+    root: &Effective,
+    loader: &Loader,
+    repos: &Repos,
+    include_test: bool,
+) -> Result<Vec<Resolved>> {
     let mut tree = Tree::default();
     let lister = |g: &str, a: &str| {
         repos.clear_progress();
         repos.versions(g, a)
     };
-    let roots = root_nodes(&root.deps, include_test)?.into_par_iter().map(|n| settled(n, loader, &root.managed, &lister)).collect::<Result<Vec<_>>>()?;
+    let roots = root_nodes(&root.deps, include_test)?
+        .into_par_iter()
+        .map(|n| settled(n, loader, &root.managed, &lister))
+        .collect::<Result<Vec<_>>>()?;
     let mut frontier: Vec<Node> = roots.into_iter().filter(|n| tree.admit(n)).collect();
 
     // Jar downloads start as soon as a node is chosen, overlapping the POM walk; results are kept so the pass below reports failures and the origin repo.
@@ -250,9 +329,23 @@ pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: b
             let expanded: Vec<Result<Vec<Node>>> = frontier
                 .par_iter()
                 .map(|n| {
-                    let kids = child_nodes(n, &loader.load(&Gav::new(&n.dep.group, &n.dep.artifact, &n.version))?.deps, &root.managed);
+                    let kids = child_nodes(
+                        n,
+                        &loader
+                            .load(&Gav::new(&n.dep.group, &n.dep.artifact, &n.version))?
+                            .deps,
+                        &root.managed,
+                    );
                     // A candidate that has already lost mediation is never loaded, so it cannot fail for its POM's sake.
-                    kids.into_par_iter().map(|k| if tree.chosen.contains_key(&k.dep.key()) { Ok(k) } else { settled(k, loader, &root.managed, &lister) }).collect::<Result<Vec<_>>>()
+                    kids.into_par_iter()
+                        .map(|k| {
+                            if tree.chosen.contains_key(&k.dep.key()) {
+                                Ok(k)
+                            } else {
+                                settled(k, loader, &root.managed, &lister)
+                            }
+                        })
+                        .collect::<Result<Vec<_>>>()
                 })
                 .collect();
 
@@ -281,31 +374,55 @@ pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: b
         .map(|k| {
             let n = &tree.chosen[k];
             let done = fetched.lock().unwrap().remove(k);
-            to_resolved(n, locate(repos, locals, n, done)?, locals.get(&Gav::new(&n.dep.group, &n.dep.artifact, &n.version)).is_some())
+            to_resolved(
+                n,
+                locate(repos, locals, n, done)?,
+                locals
+                    .get(&Gav::new(&n.dep.group, &n.dep.artifact, &n.version))
+                    .is_some(),
+            )
         })
         .collect();
     unique_artifacts(results)
 }
 
 /// The jar of `n`: the prefetched result if there is one, else fetched now. POM-only dependencies have none.
-fn locate(repos: &Repos, locals: &LocalModules, n: &Node, prefetched: Option<Result<Option<Located>>>) -> Result<Option<Located>> {
+fn locate(
+    repos: &Repos,
+    locals: &LocalModules,
+    n: &Node,
+    prefetched: Option<Result<Option<Located>>>,
+) -> Result<Option<Located>> {
     if n.dep.typ == "pom" {
         return Ok(None);
     }
     match prefetched.unwrap_or_else(|| fetch_jar(repos, locals, n))? {
         Some(l) => Ok(Some(l)),
-        None => anyhow::bail!("artifact not found in any repository: {}", Gav::new(&n.dep.group, &n.dep.artifact, &n.version)),
+        None => anyhow::bail!(
+            "artifact not found in any repository: {}",
+            Gav::new(&n.dep.group, &n.dep.artifact, &n.version)
+        ),
     }
 }
 
 /// The classifier a dependency is stored under: `test-jar` is the `tests` classifier unless one is given.
 /// [Maven: type `test-jar`](https://maven.apache.org/ref/current/maven-core/artifact-handlers.html)
 fn classifier_of(d: &Dep) -> Option<&str> {
-    d.classifier.as_deref().or(if d.typ == "test-jar" { Some("tests") } else { None })
+    d.classifier.as_deref().or(if d.typ == "test-jar" {
+        Some("tests")
+    } else {
+        None
+    })
 }
 
 fn to_resolved(n: &Node, loc: Option<Located>, workspace: bool) -> Result<Resolved> {
-    let sha256 = if workspace { None } else { loc.as_ref().map(|l| crate::repos::sha256_file(&l.path)).transpose()? };
+    let sha256 = if workspace {
+        None
+    } else {
+        loc.as_ref()
+            .map(|l| crate::repos::sha256_file(&l.path))
+            .transpose()?
+    };
     Ok(Resolved {
         gav: Gav::new(&n.dep.group, &n.dep.artifact, &n.version),
         scope: n.scope.clone(),
@@ -340,14 +457,31 @@ fn fetch_jar(repos: &Repos, locals: &LocalModules, n: &Node) -> Result<Option<Lo
     }
     let gav = Gav::new(&n.dep.group, &n.dep.artifact, &n.version);
     if let Some(dir) = locals.output(&gav, classifier_of(&n.dep), &n.dep.typ) {
-        return Ok(Some(Located { path: dir, downloaded: false, repo: None }));
+        return Ok(Some(Located {
+            path: dir,
+            downloaded: false,
+            repo: None,
+        }));
     }
     if locals.get(&gav).is_some() {
-        anyhow::bail!("{gav} is a module of this build, but the build does not produce its {} artifact", classifier_of(&n.dep).unwrap_or(&n.dep.typ));
+        anyhow::bail!(
+            "{gav} is a module of this build, but the build does not produce its {} artifact",
+            classifier_of(&n.dep).unwrap_or(&n.dep.typ)
+        );
     }
     let typ = n.dep.typ.as_str();
-    let ext = if matches!(typ, "bundle" | "maven-plugin" | "test-jar") { "jar" } else { typ };
-    repos.get(&n.dep.group, &n.dep.artifact, &n.version, classifier_of(&n.dep), ext)
+    let ext = if matches!(typ, "bundle" | "maven-plugin" | "test-jar") {
+        "jar"
+    } else {
+        typ
+    };
+    repos.get(
+        &n.dep.group,
+        &n.dep.artifact,
+        &n.version,
+        classifier_of(&n.dep),
+        ext,
+    )
 }
 
 #[cfg(test)]
@@ -355,7 +489,14 @@ mod tests {
     use super::*;
 
     fn dep(artifact: &str, version: Option<&str>, scope: Option<&str>) -> Dep {
-        Dep { group: "g".into(), artifact: artifact.into(), version: version.map(Into::into), scope: scope.map(Into::into), typ: "jar".into(), ..Default::default() }
+        Dep {
+            group: "g".into(),
+            artifact: artifact.into(),
+            version: version.map(Into::into),
+            scope: scope.map(Into::into),
+            typ: "jar".into(),
+            ..Default::default()
+        }
     }
 
     fn node(d: Dep, parent: Option<&Node>) -> Node {
@@ -375,37 +516,65 @@ mod tests {
         nodes.iter().map(|n| n.dep.artifact.as_str()).collect()
     }
 
-    fn lister(listed: &'static [&'static str]) -> impl Fn(&str, &str) -> Result<Vec<String>> + Sync {
+    fn lister(
+        listed: &'static [&'static str],
+    ) -> impl Fn(&str, &str) -> Result<Vec<String>> + Sync {
         move |_, _| Ok(listed.iter().map(|s| s.to_string()).collect())
     }
 
     #[test]
     fn a_range_becomes_the_highest_version_inside_it() {
-        let n = pinned(node(dep("a", Some("[1.0,2.0)"), None), None), &lister(&["0.9", "1.0", "1.9", "2.0"])).unwrap();
+        let n = pinned(
+            node(dep("a", Some("[1.0,2.0)"), None), None),
+            &lister(&["0.9", "1.0", "1.9", "2.0"]),
+        )
+        .unwrap();
         assert_eq!(n.version, "1.9");
     }
 
     #[test]
     fn an_exact_range_needs_no_listing() {
         let never = |_: &str, _: &str| -> Result<Vec<String>> { panic!("[x] needs no listing") };
-        assert_eq!(pinned(node(dep("a", Some("[2.2.273]"), None), None), &never).unwrap().version, "2.2.273");
+        assert_eq!(
+            pinned(node(dep("a", Some("[2.2.273]"), None), None), &never)
+                .unwrap()
+                .version,
+            "2.2.273"
+        );
     }
 
     #[test]
     fn an_ordinary_version_is_not_looked_up() {
-        let never = |_: &str, _: &str| -> Result<Vec<String>> { panic!("a soft version needs no listing") };
-        assert_eq!(pinned(node(dep("a", Some("1.2.3"), None), None), &never).unwrap().version, "1.2.3");
+        let never =
+            |_: &str, _: &str| -> Result<Vec<String>> { panic!("a soft version needs no listing") };
+        assert_eq!(
+            pinned(node(dep("a", Some("1.2.3"), None), None), &never)
+                .unwrap()
+                .version,
+            "1.2.3"
+        );
     }
 
     #[test]
     fn a_range_nothing_satisfies_names_the_dependency_and_the_range() {
-        let e = pinned(node(dep("a", Some("[3.0,4.0)"), None), None), &lister(&["1.0", "2.0"])).unwrap_err().to_string();
-        assert!(e.contains("g:a") && e.contains("[3.0,4.0)") && e.contains("2 versions"), "{e}");
+        let e = pinned(
+            node(dep("a", Some("[3.0,4.0)"), None), None),
+            &lister(&["1.0", "2.0"]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("g:a") && e.contains("[3.0,4.0)") && e.contains("2 versions"),
+            "{e}"
+        );
     }
 
     #[test]
     fn a_malformed_range_names_the_dependency() {
-        let e = format!("{:#}", pinned(node(dep("a", Some("[1.0,2.0"), None), None), &lister(&[])).unwrap_err());
+        let e = format!(
+            "{:#}",
+            pinned(node(dep("a", Some("[1.0,2.0"), None), None), &lister(&[])).unwrap_err()
+        );
         assert!(e.contains("g:a") && e.contains("[1.0,2.0"), "{e}");
     }
 
@@ -430,19 +599,43 @@ mod tests {
     #[test]
     fn a_relocation_moves_only_the_fields_it_names() {
         let mut n = node(dep("old", Some("1"), None), None);
-        let r = Relocation { group: Some("new-g".into()), ..Default::default() };
+        let r = Relocation {
+            group: Some("new-g".into()),
+            ..Default::default()
+        };
         assert!(apply_relocation(&mut n, &r, &HashMap::new()));
-        assert_eq!((n.dep.group.as_str(), n.dep.artifact.as_str(), n.version.as_str()), ("new-g", "old", "1"));
-        assert!(!apply_relocation(&mut n, &r, &HashMap::new()), "already there: nothing changes, so a loop ends");
-        let r = Relocation { artifact: Some("newer".into()), version: Some("2".into()), ..Default::default() };
+        assert_eq!(
+            (
+                n.dep.group.as_str(),
+                n.dep.artifact.as_str(),
+                n.version.as_str()
+            ),
+            ("new-g", "old", "1")
+        );
+        assert!(
+            !apply_relocation(&mut n, &r, &HashMap::new()),
+            "already there: nothing changes, so a loop ends"
+        );
+        let r = Relocation {
+            artifact: Some("newer".into()),
+            version: Some("2".into()),
+            ..Default::default()
+        };
         assert!(apply_relocation(&mut n, &r, &HashMap::new()));
-        assert_eq!((n.dep.artifact.as_str(), n.version.as_str()), ("newer", "2"));
+        assert_eq!(
+            (n.dep.artifact.as_str(), n.version.as_str()),
+            ("newer", "2")
+        );
     }
 
     #[test]
     fn a_version_managed_for_the_new_coordinates_beats_the_relocation_version() {
         let mut n = node(dep("old", Some("1"), None), None);
-        let r = Relocation { artifact: Some("new".into()), version: Some("2".into()), ..Default::default() };
+        let r = Relocation {
+            artifact: Some("new".into()),
+            version: Some("2".into()),
+            ..Default::default()
+        };
         let pinned = dep("new", Some("9"), None);
         apply_relocation(&mut n, &r, &HashMap::from([(pinned.key(), pinned)]));
         assert_eq!(n.version, "9");
@@ -454,10 +647,23 @@ mod tests {
         parent.exclusions = vec![("g".into(), "gone".into())];
         let mut optional = dep("opt", Some("1"), None);
         optional.optional = true;
-        let deps = [dep("ok", Some("1"), None), optional, dep("gone", Some("1"), None), dep("nover", None, None), dep("t", Some("1"), Some("test"))];
+        let deps = [
+            dep("ok", Some("1"), None),
+            optional,
+            dep("gone", Some("1"), None),
+            dep("nover", None, None),
+            dep("t", Some("1"), Some("test")),
+        ];
         let kids = child_nodes(&parent, &deps, &HashMap::new());
         assert_eq!(artifacts(&kids), ["ok"]);
-        assert_eq!((kids[0].depth, kids[0].via.as_deref(), kids[0].parent.as_deref()), (2, Some("g:p:1"), Some("g:p:jar:")));
+        assert_eq!(
+            (
+                kids[0].depth,
+                kids[0].via.as_deref(),
+                kids[0].parent.as_deref()
+            ),
+            (2, Some("g:p:1"), Some("g:p:jar:"))
+        );
     }
 
     #[test]
@@ -474,18 +680,31 @@ mod tests {
         parent.exclusions = vec![("x".into(), "*".into())];
         let mut c = dep("c", Some("1"), None);
         c.exclusions = vec![("y".into(), "z".into())];
-        assert_eq!(child_nodes(&parent, &[c], &HashMap::new())[0].exclusions, [("x".into(), "*".into()), ("y".into(), "z".into())]);
+        assert_eq!(
+            child_nodes(&parent, &[c], &HashMap::new())[0].exclusions,
+            [("x".into(), "*".into()), ("y".into(), "z".into())]
+        );
     }
 
     #[test]
     fn tree_keeps_the_first_node_and_orders_depth_first() {
         let mut t = Tree::default();
-        let (a, b) = (node(dep("a", Some("1"), None), None), node(dep("b", Some("1"), None), None));
-        let (a1, a2) = (node(dep("a1", Some("1"), None), Some(&a)), node(dep("a2", Some("1"), None), Some(&a)));
+        let (a, b) = (
+            node(dep("a", Some("1"), None), None),
+            node(dep("b", Some("1"), None), None),
+        );
+        let (a1, a2) = (
+            node(dep("a1", Some("1"), None), Some(&a)),
+            node(dep("a2", Some("1"), None), Some(&a)),
+        );
         let b_dup_of_a1 = node(dep("a1", Some("2"), None), Some(&b));
         assert!([&a, &b, &a1, &a2].iter().all(|n| t.admit(n)));
         assert!(!t.admit(&b_dup_of_a1));
-        let order: Vec<_> = t.classpath_order().iter().map(|k| k.split(':').nth(1).unwrap().to_string()).collect();
+        let order: Vec<_> = t
+            .classpath_order()
+            .iter()
+            .map(|k| k.split(':').nth(1).unwrap().to_string())
+            .collect();
         assert_eq!(order, ["a", "a1", "a2", "b"]);
         assert_eq!(t.chosen[&a1.dep.key()].version, "1");
     }

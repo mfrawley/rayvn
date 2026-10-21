@@ -14,7 +14,10 @@ pub fn home() -> PathBuf {
 
 /// `$XDG_CACHE_HOME/rayvn/repository`, else `~/.cache/rayvn/repository` (also on macOS, like uv and cargo).
 pub fn default_cache_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home().join(".cache"));
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home().join(".cache"));
     base.join("rayvn/repository")
 }
 
@@ -91,20 +94,34 @@ pub fn load() -> Result<(Settings, Vec<PathBuf>)> {
     let path = home().join(".m2/settings.xml");
     if !path.is_file() {
         let local_repo = std::env::var("RAYVN_LOCAL_REPO").ok().map(PathBuf::from);
-        return Ok((Settings { local_repo, ..Default::default() }, vec![]));
+        return Ok((
+            Settings {
+                local_repo,
+                ..Default::default()
+            },
+            vec![],
+        ));
     }
-    let xml = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let xml =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let doc = Document::parse(&xml).context("invalid settings.xml")?;
     let root = doc.root_element();
-    let mut s = Settings::default();
-
-    s.local_repo = std::env::var("RAYVN_LOCAL_REPO")
+    let local_repo = std::env::var("RAYVN_LOCAL_REPO")
         .ok()
         .map(PathBuf::from)
         .or_else(|| text(root, "localRepository").map(|p| PathBuf::from(expand(&p))));
+    let mut s = Settings {
+        local_repo,
+        ..Default::default()
+    };
 
     let active: Vec<String> = child(root, "activeProfiles")
-        .map(|a| a.children().filter(|c| c.is_element()).filter_map(|c| c.text().map(|t| t.trim().to_string())).collect())
+        .map(|a| {
+            a.children()
+                .filter(|c| c.is_element())
+                .filter_map(|c| c.text().map(|t| t.trim().to_string()))
+                .collect()
+        })
         .unwrap_or_default();
 
     if let Some(profiles) = child(root, "profiles") {
@@ -120,7 +137,10 @@ pub fn load() -> Result<(Settings, Vec<PathBuf>)> {
             if let Some(repos) = child(p, "repositories") {
                 for r in repos.children().filter(|c| c.is_element()) {
                     if let (Some(id), Some(url)) = (text(r, "id"), text(r, "url")) {
-                        s.repos.push(RepoDecl { id, url: expand(&url) });
+                        s.repos.push(RepoDecl {
+                            id,
+                            url: expand(&url),
+                        });
                     }
                 }
             }
@@ -129,15 +149,23 @@ pub fn load() -> Result<(Settings, Vec<PathBuf>)> {
 
     if let Some(ms) = child(root, "mirrors") {
         for m in ms.children().filter(|c| c.is_element()) {
-            if let (Some(id), Some(url), Some(of)) = (text(m, "id"), text(m, "url"), text(m, "mirrorOf")) {
-                s.mirrors.push(Mirror { id, url: expand(&url), mirror_of: of });
+            if let (Some(id), Some(url), Some(of)) =
+                (text(m, "id"), text(m, "url"), text(m, "mirrorOf"))
+            {
+                s.mirrors.push(Mirror {
+                    id,
+                    url: expand(&url),
+                    mirror_of: of,
+                });
             }
         }
     }
 
     if let Some(ss) = child(root, "servers") {
         for sv in ss.children().filter(|c| c.is_element()) {
-            if let (Some(id), Some(u), Some(p)) = (text(sv, "id"), text(sv, "username"), text(sv, "password")) {
+            if let (Some(id), Some(u), Some(p)) =
+                (text(sv, "id"), text(sv, "username"), text(sv, "password"))
+            {
                 s.servers.insert(id, (u, p));
             }
         }
@@ -148,14 +176,20 @@ pub fn load() -> Result<(Settings, Vec<PathBuf>)> {
             if text(p, "active").as_deref() == Some("false") {
                 continue;
             }
-            let (Some(host), id) = (text(p, "host"), text(p, "id").unwrap_or_default()) else { continue };
+            let (Some(host), id) = (text(p, "host"), text(p, "id").unwrap_or_default()) else {
+                continue;
+            };
             let port = match text(p, "port") {
-                Some(v) => v.parse().with_context(|| format!("proxy '{id}': invalid port '{v}'"))?,
+                Some(v) => v
+                    .parse()
+                    .with_context(|| format!("proxy '{id}': invalid port '{v}'"))?,
                 None => 8080,
             };
             s.proxies.push(ProxyCfg {
                 id,
-                protocol: text(p, "protocol").unwrap_or_else(|| "http".into()).to_ascii_lowercase(),
+                protocol: text(p, "protocol")
+                    .unwrap_or_else(|| "http".into())
+                    .to_ascii_lowercase(),
                 host,
                 port,
                 username: text(p, "username"),
@@ -175,9 +209,13 @@ impl Mirror {
                 if neg == repo_id {
                     return false;
                 }
-            } else if term == "*" || term == repo_id {
-                hit = true;
-            } else if term == "external:*" && !url.contains("localhost") && !url.contains("127.0.0.1") && !url.starts_with("file:") {
+            } else if term == "*"
+                || term == repo_id
+                || (term == "external:*"
+                    && !url.contains("localhost")
+                    && !url.contains("127.0.0.1")
+                    && !url.starts_with("file:"))
+            {
                 hit = true;
             }
         }
@@ -295,7 +333,11 @@ impl Hint {
     }
 
     pub fn names(&self, id: &str, url: &str) -> bool {
-        self.repo.as_deref() == Some(id) || self.url.as_deref().is_some_and(|u| u.trim_end_matches('/') == url.trim_end_matches('/'))
+        self.repo.as_deref() == Some(id)
+            || self
+                .url
+                .as_deref()
+                .is_some_and(|u| u.trim_end_matches('/') == url.trim_end_matches('/'))
     }
 }
 
@@ -305,7 +347,9 @@ pub fn default_hints() -> Vec<Hint> {
     struct File {
         hint: Vec<Hint>,
     }
-    toml::from_str::<File>(include_str!("../data/default-hints.toml")).expect("data/default-hints.toml is valid").hint
+    toml::from_str::<File>(include_str!("../data/default-hints.toml"))
+        .expect("data/default-hints.toml is valid")
+        .hint
 }
 
 impl Route {
@@ -323,7 +367,8 @@ fn group_specificity(patterns: &[String], group: &str) -> Option<usize> {
             if p == "*" {
                 Some(1)
             } else if let Some(prefix) = p.strip_suffix(".*") {
-                (group == prefix || group.starts_with(&format!("{prefix}."))).then(|| 2 + prefix.len())
+                (group == prefix || group.starts_with(&format!("{prefix}.")))
+                    .then(|| 2 + prefix.len())
             } else {
                 (p == group).then(|| 10_000 + p.len())
             }
@@ -339,12 +384,21 @@ pub fn load_config(project_dir: &Path) -> Result<(Config, Vec<PathBuf>)> {
     // User config first: its credentials win over a project file's CI-oriented env refs.
     for p in [user_cfg.clone(), project_dir.join("rayvn.toml")] {
         if p.is_file() {
-            let c: Config = toml::from_str(&std::fs::read_to_string(&p)?).with_context(|| format!("parsing {}", p.display()))?;
+            let c: Config = toml::from_str(&std::fs::read_to_string(&p)?)
+                .with_context(|| format!("parsing {}", p.display()))?;
             // A project file can come from an untrusted checkout, so it must not run commands.
-            if p != user_cfg {
-                if let Some(r) = c.repo.iter().find(|r| r.token_cmd.is_some() || r.password_cmd.is_some()) {
-                    bail!("{}: repository '{}' uses token_cmd/password_cmd, which is only allowed in {}", p.display(), r.id, user_cfg.display());
-                }
+            if p != user_cfg
+                && let Some(r) = c
+                    .repo
+                    .iter()
+                    .find(|r| r.token_cmd.is_some() || r.password_cmd.is_some())
+            {
+                bail!(
+                    "{}: repository '{}' uses token_cmd/password_cmd, which is only allowed in {}",
+                    p.display(),
+                    r.id,
+                    user_cfg.display()
+                );
             }
             cfg.route.extend(c.route);
             cfg.hint.extend(c.hint);
@@ -369,24 +423,45 @@ mod tests {
 
     #[test]
     fn test_settings_later_file_wins_and_inputs_add_up() {
-        let user = TestSettings { cache: Some(true), shards: Some(2), inputs: vec!["a".into()], ..Default::default() };
-        let project = TestSettings { cache: Some(false), cache_integration: Some(true), inputs: vec!["b".into()], ..Default::default() };
+        let user = TestSettings {
+            cache: Some(true),
+            shards: Some(2),
+            inputs: vec!["a".into()],
+            ..Default::default()
+        };
+        let project = TestSettings {
+            cache: Some(false),
+            cache_integration: Some(true),
+            inputs: vec!["b".into()],
+            ..Default::default()
+        };
         let merged = user.overridden_by(project);
-        assert_eq!((merged.cache, merged.cache_integration, merged.shards), (Some(false), Some(true), Some(2)));
+        assert_eq!(
+            (merged.cache, merged.cache_integration, merged.shards),
+            (Some(false), Some(true), Some(2))
+        );
         assert_eq!(merged.inputs, ["a", "b"]);
     }
 
     #[test]
     fn workspace_exclude_parses_from_toml() {
-        let c: Config = toml::from_str("[workspace]\nexclude = [\"archive\", \"projects/year_2024/*\"]\n").unwrap();
+        let c: Config =
+            toml::from_str("[workspace]\nexclude = [\"archive\", \"projects/year_2024/*\"]\n")
+                .unwrap();
         assert_eq!(c.workspace.exclude, ["archive", "projects/year_2024/*"]);
         assert!(Config::default().workspace.exclude.is_empty());
     }
 
     #[test]
     fn test_section_parses_from_toml() {
-        let c: Config = toml::from_str("[test]\ncache_integration = true\nshards = 4\ninputs = [\"test/input/**\"]\n").unwrap();
-        assert_eq!((c.test.cache, c.test.cache_integration, c.test.shards), (None, Some(true), Some(4)));
+        let c: Config = toml::from_str(
+            "[test]\ncache_integration = true\nshards = 4\ninputs = [\"test/input/**\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (c.test.cache, c.test.cache_integration, c.test.shards),
+            (None, Some(true), Some(4))
+        );
         assert_eq!(c.test.inputs, ["test/input/**"]);
     }
 }

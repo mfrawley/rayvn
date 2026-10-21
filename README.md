@@ -53,6 +53,15 @@ rvn --version                     # commit, build time and name of this binary
 
 Environment: `RAYVN_LOCAL_REPO` (cache location), `RAYVN_RO_REPO` (read-only cache layers), `RAYVN_DEBUG_HTTP=1` (print each request and status), `RAYVN_NO_BANNER=1` (hide the banner), `RAYVN_TEST_CACHE` (where test results are stored). Routing and credentials: `docs/routing.md`, `docs/credentials.md`.
 
+## Development
+
+`scripts/check.sh` runs what a commit must pass: `cargo fmt --check` (rustfmt defaults), `cargo clippy --all-targets -- -D warnings` and `cargo test`. Run it by hand, or once per clone enable it as a pre-commit hook:
+
+```sh
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit scripts/check.sh
+```
+
 ## Where things are
 
 - `proposals/`: design decisions, numbered, not rewritten after the fact.

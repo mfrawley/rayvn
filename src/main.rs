@@ -24,7 +24,15 @@ fn print_banner() {
     }
 }
 
-const COMMANDS: [&str; 7] = ["lock", "fetch", "resolve", "classpath", "build", "test", "verify"];
+const COMMANDS: [&str; 7] = [
+    "lock",
+    "fetch",
+    "resolve",
+    "classpath",
+    "build",
+    "test",
+    "verify",
+];
 const USAGE: &str = "usage: rvn <lock|fetch|resolve|classpath|build|test|verify> [-f pom.xml] [--locked] [--refresh] [--cold] [--rerun] [--test-cache dir] [-m module]";
 
 #[derive(Debug, PartialEq)]
@@ -43,14 +51,20 @@ struct Args {
 impl Args {
     /// `None` for no or an unknown command (print usage).
     fn parse(args: &[String]) -> Result<Option<Args>> {
-        let Some(cmd) = args.first().filter(|c| COMMANDS.contains(&c.as_str())) else { return Ok(None) };
+        let Some(cmd) = args.first().filter(|c| COMMANDS.contains(&c.as_str())) else {
+            return Ok(None);
+        };
         let flag = |name: &str| args.iter().any(|a| a == name);
         let pom_path = match args.iter().position(|a| a == "-f") {
             Some(i) => PathBuf::from(args.get(i + 1).context("-f needs a path")?),
             None => PathBuf::from("pom.xml"),
         };
         let test_cache = match args.iter().position(|a| a == "--test-cache") {
-            Some(i) => Some(args.get(i + 1).context("--test-cache needs a directory")?.clone()),
+            Some(i) => Some(
+                args.get(i + 1)
+                    .context("--test-cache needs a directory")?
+                    .clone(),
+            ),
             None => None,
         };
         let module = match args.iter().position(|a| a == "-m" || a == "--module") {
@@ -59,39 +73,72 @@ impl Args {
         };
         let cold = flag("--cold");
         if cold && cmd == "classpath" {
-            bail!("--cold deletes its cache afterwards, so `classpath` would print paths that no longer exist");
+            bail!(
+                "--cold deletes its cache afterwards, so `classpath` would print paths that no longer exist"
+            );
         }
-        Ok(Some(Args { cmd: cmd.clone(), pom_path, locked: flag("--locked"), refresh: cold || flag("--refresh"), cold, test: flag("--test"), rerun: flag("--rerun"), test_cache, module }))
+        Ok(Some(Args {
+            cmd: cmd.clone(),
+            pom_path,
+            locked: flag("--locked"),
+            refresh: cold || flag("--refresh"),
+            cold,
+            test: flag("--test"),
+            rerun: flag("--rerun"),
+            test_cache,
+            module,
+        }))
     }
 
     fn project_dir(&self) -> PathBuf {
-        self.pom_path.parent().filter(|p| !p.as_os_str().is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+        self.pom_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 }
 
 fn cold_cache_dir() -> PathBuf {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     std::env::temp_dir().join(format!("rvn-cold-{}-{nanos}", std::process::id()))
 }
 
 /// The dependency set of `module` for `args`: from its fresh `rayvn.lock` when there is one, else resolved from the
 /// POM (and the lock rewritten). `lock_hash` covers the module's POMs and those of the modules it depends on.
-fn dependencies(args: &Args, module: &reactor::Module, lock_hash: &str, repos: &repos::Repos, loader: &model::Loader) -> Result<Vec<resolve::Resolved>> {
+fn dependencies(
+    args: &Args,
+    module: &reactor::Module,
+    lock_hash: &str,
+    repos: &repos::Repos,
+    loader: &model::Loader,
+) -> Result<Vec<resolve::Resolved>> {
     let lock_path = module.lock_path();
     let fetch = args.cmd == "fetch";
-    let fresh = if args.cmd == "lock" || (args.refresh && !fetch) { None } else { lock::read_fresh(&lock_path, lock_hash) };
+    let fresh = if args.cmd == "lock" || (args.refresh && !fetch) {
+        None
+    } else {
+        lock::read_fresh(&lock_path, lock_hash)
+    };
     if let Some(l) = fresh {
         eprintln!("  using rayvn.lock ({} packages)", l.package.len());
         let resolved = lock::realize(&l, repos, loader.locals())?;
         if fetch {
             let (ok, skipped) = lock::verify(&l, &resolved)?;
-            eprintln!("  verified {ok} files against rayvn.lock ({skipped} not checkable: no checksum recorded, SNAPSHOT, or a module of this build)");
+            eprintln!(
+                "  verified {ok} files against rayvn.lock ({skipped} not checkable: no checksum recorded, SNAPSHOT, or a module of this build)"
+            );
         }
         return Ok(resolved);
     }
     eprintln!("  resolving dependencies");
     if fetch || args.locked {
-        bail!("{} is missing or out of date; run `rvn lock`", lock_path.display());
+        bail!(
+            "{} is missing or out of date; run `rvn lock`",
+            lock_path.display()
+        );
     }
     let resolved = resolve::resolve(&module.effective, loader, repos, true)?;
     lock::write(&lock_path, lock_hash, &resolved, repos)?;
@@ -114,7 +161,16 @@ fn classpath_line(resolved: &[resolve::Resolved], include_test: bool) -> String 
 fn resolve_lines(resolved: &[resolve::Resolved]) -> Vec<String> {
     resolved
         .iter()
-        .map(|r| format!("{}{}:{}  [{}] {}", "  ".repeat(r.depth - 1), r.gav.group, r.gav.artifact, r.scope, r.gav.version))
+        .map(|r| {
+            format!(
+                "{}{}:{}  [{}] {}",
+                "  ".repeat(r.depth - 1),
+                r.gav.group,
+                r.gav.artifact,
+                r.scope,
+                r.gav.version
+            )
+        })
         .collect()
 }
 
@@ -132,7 +188,13 @@ fn warn_unrun(root: &model::Effective) {
 
 /// What `args.cmd` does for one module, once its dependencies are known. Returns `false` when nothing was built
 /// (so there is nothing to report).
-fn run_module(args: &Args, module: &reactor::Module, resolved: &[resolve::Resolved], provides_tests: bool, cx: &Services) -> Result<Vec<verify::TestOutcome>> {
+fn run_module(
+    args: &Args,
+    module: &reactor::Module,
+    resolved: &[resolve::Resolved],
+    provides_tests: bool,
+    cx: &Services,
+) -> Result<Vec<verify::TestOutcome>> {
     let (root, dir) = (&module.effective, module.dir.as_path());
     match args.cmd.as_str() {
         "lock" | "fetch" => {}
@@ -140,7 +202,10 @@ fn run_module(args: &Args, module: &reactor::Module, resolved: &[resolve::Resolv
         "classpath" => println!("{}", classpath_line(resolved, args.test)),
         "build" | "test" | "verify" => {
             if root.packaging != "jar" {
-                bail!("packaging '{}' is not supported yet (only jar)", root.packaging);
+                bail!(
+                    "packaging '{}' is not supported yet (only jar)",
+                    root.packaging
+                );
             }
             warn_unrun(root);
             let main_classes = build::compile_main(root, dir, resolved)?;
@@ -192,7 +257,15 @@ fn test_report(rows: &[(String, Vec<verify::TestOutcome>)]) -> Vec<String> {
         modules_with_tests += 1;
         ran += r;
         cached += c;
-        lines.push(format!("  {name}: {} passed{}", r + c, if c > 0 { format!(" ({c} cached)") } else { String::new() }));
+        lines.push(format!(
+            "  {name}: {} passed{}",
+            r + c,
+            if c > 0 {
+                format!(" ({c} cached)")
+            } else {
+                String::new()
+            }
+        ));
     }
     let silent = rows.len() - modules_with_tests;
     lines.push(format!("  total: {} passed in {modules_with_tests} modules ({cached} cached); {silent} modules have no tests", ran + cached));
@@ -207,23 +280,38 @@ struct Services<'a> {
 /// The modules `args` acts on, in build order, aggregators left out. Commands that only read dependencies
 /// (`lock`, `fetch`, `resolve`, `classpath`) take just the module named with `-m`; the others also build what it needs.
 fn pick(args: &Args, modules: &[reactor::Module]) -> Result<Vec<usize>> {
-    let only_named = matches!(args.cmd.as_str(), "lock" | "fetch" | "resolve" | "classpath");
+    let only_named = matches!(
+        args.cmd.as_str(),
+        "lock" | "fetch" | "resolve" | "classpath"
+    );
     let chosen = match (&args.module, only_named) {
         (Some(m), true) => vec![reactor::find(modules, m)?],
         (m, _) => reactor::select(modules, m.as_deref())?,
     };
-    let chosen: Vec<usize> = chosen.into_iter().filter(|&i| !modules[i].is_aggregator()).collect();
+    let chosen: Vec<usize> = chosen
+        .into_iter()
+        .filter(|&i| !modules[i].is_aggregator())
+        .collect();
     if chosen.is_empty() {
-        bail!("{} lists modules but none of them builds anything", args.pom_path.display());
+        bail!(
+            "{} lists modules but none of them builds anything",
+            args.pom_path.display()
+        );
     }
     Ok(chosen)
 }
 
 fn run() -> Result<()> {
     // Downloads block on the network, so allow far more in flight than there are cores.
-    rayon::ThreadPoolBuilder::new().num_threads(32).build_global().ok();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(32)
+        .build_global()
+        .ok();
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    if raw.first().is_some_and(|a| matches!(a.as_str(), "--version" | "-V" | "version")) {
+    if raw
+        .first()
+        .is_some_and(|a| matches!(a.as_str(), "--version" | "-V" | "version"))
+    {
         println!("{}", version());
         return Ok(());
     }
@@ -249,7 +337,10 @@ fn run() -> Result<()> {
         eprintln!("warning: [workspace] exclude '{g}' matches no module");
     }
     let found = scan.found;
-    let declared: Vec<_> = found.iter().flat_map(|f| f.poms.repos.iter().cloned()).collect();
+    let declared: Vec<_> = found
+        .iter()
+        .flat_map(|f| f.poms.repos.iter().cloned())
+        .collect();
     let repos = repos::Repos::new(&declared, &settings, &config, args.refresh, args.cold)?;
     let mut loader = model::Loader::new(&repos);
     let modules = reactor::load(found, &loader)?;
@@ -260,7 +351,14 @@ fn run() -> Result<()> {
     let selected: Vec<usize> = pick(&args, &modules)?;
     let many = selected.len() > 1;
     if many && args.cmd == "classpath" {
-        bail!("`classpath` prints one line; choose a module with -m ({})", selected.iter().map(|&i| modules[i].name()).collect::<Vec<_>>().join(", "));
+        bail!(
+            "`classpath` prints one line; choose a module with -m ({})",
+            selected
+                .iter()
+                .map(|&i| modules[i].name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     eprintln!(
         "rvn {}: {} ({} repositories, {} routes{})",
@@ -268,10 +366,17 @@ fn run() -> Result<()> {
         args.pom_path.display(),
         repos.remote_count(),
         repos.route_count(),
-        if many { format!(", {} modules", selected.len()) } else { String::new() }
+        if many {
+            format!(", {} modules", selected.len())
+        } else {
+            String::new()
+        }
     );
     let test_providers = reactor::test_class_providers(&modules, &selected);
-    let services = Services { repos: &repos, config: &config };
+    let services = Services {
+        repos: &repos,
+        config: &config,
+    };
     let mut test_rows = vec![];
     for &i in &selected {
         let module = &modules[i];
@@ -281,12 +386,24 @@ fn run() -> Result<()> {
         let lock_hash = lock::fingerprint(&reactor::lock_inputs(&modules, &edges, i))?;
         let resolved = dependencies(&args, module, &lock_hash, &repos, &loader)?;
         let direct = resolved.iter().filter(|r| r.depth == 1).count();
-        eprintln!("  {} artifacts ({direct} direct): {}", resolved.len(), repos.summary());
-        let outcomes = run_module(&args, module, &resolved, test_providers.contains(&i), &services)?;
+        eprintln!(
+            "  {} artifacts ({direct} direct): {}",
+            resolved.len(),
+            repos.summary()
+        );
+        let outcomes = run_module(
+            &args,
+            module,
+            &resolved,
+            test_providers.contains(&i),
+            &services,
+        )?;
         test_rows.push((module.name().to_string(), outcomes));
     }
     if many && matches!(args.cmd.as_str(), "test" | "verify") {
-        test_report(&test_rows).iter().for_each(|l| eprintln!("{l}"));
+        test_report(&test_rows)
+            .iter()
+            .for_each(|l| eprintln!("{l}"));
     }
     eprintln!("done in {:?}", t0.elapsed());
     if let Some(d) = cold_dir {
@@ -311,10 +428,18 @@ mod tests {
 
     #[test]
     fn flags_and_pom_path_are_parsed() {
-        let a = parse(&["build", "-f", "sub/pom.xml", "--locked", "--refresh"]).unwrap().unwrap();
-        assert_eq!((a.cmd.as_str(), a.locked, a.refresh, a.cold, a.test), ("build", true, true, false, false));
+        let a = parse(&["build", "-f", "sub/pom.xml", "--locked", "--refresh"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (a.cmd.as_str(), a.locked, a.refresh, a.cold, a.test),
+            ("build", true, true, false, false)
+        );
         assert_eq!(a.project_dir(), PathBuf::from("sub"));
-        assert_eq!(parse(&["lock"]).unwrap().unwrap().project_dir(), PathBuf::from("."));
+        assert_eq!(
+            parse(&["lock"]).unwrap().unwrap().project_dir(),
+            PathBuf::from(".")
+        );
     }
 
     #[test]
@@ -332,15 +457,36 @@ mod tests {
 
     #[test]
     fn test_cache_flag_takes_a_directory() {
-        assert_eq!(parse(&["test", "--test-cache", "/ci"]).unwrap().unwrap().test_cache.as_deref(), Some("/ci"));
+        assert_eq!(
+            parse(&["test", "--test-cache", "/ci"])
+                .unwrap()
+                .unwrap()
+                .test_cache
+                .as_deref(),
+            Some("/ci")
+        );
         assert_eq!(parse(&["test"]).unwrap().unwrap().test_cache, None);
         assert!(parse(&["test", "--test-cache"]).is_err());
     }
 
     #[test]
     fn module_flag_takes_a_name() {
-        assert_eq!(parse(&["test", "-m", "core"]).unwrap().unwrap().module.as_deref(), Some("core"));
-        assert_eq!(parse(&["test", "--module", "core"]).unwrap().unwrap().module.as_deref(), Some("core"));
+        assert_eq!(
+            parse(&["test", "-m", "core"])
+                .unwrap()
+                .unwrap()
+                .module
+                .as_deref(),
+            Some("core")
+        );
+        assert_eq!(
+            parse(&["test", "--module", "core"])
+                .unwrap()
+                .unwrap()
+                .module
+                .as_deref(),
+            Some("core")
+        );
         assert_eq!(parse(&["test"]).unwrap().unwrap().module, None);
         assert!(parse(&["test", "-m"]).is_err());
     }
@@ -355,7 +501,12 @@ mod tests {
         ];
         assert_eq!(
             test_report(&rows),
-            ["tests by module:", "  a: 3 passed", "  c: 5 passed (4 cached)", "  total: 8 passed in 2 modules (4 cached); 1 modules have no tests"]
+            [
+                "tests by module:",
+                "  a: 3 passed",
+                "  c: 5 passed (4 cached)",
+                "  total: 8 passed in 2 modules (4 cached); 1 modules have no tests"
+            ]
         );
     }
 
@@ -377,7 +528,13 @@ mod tests {
         };
         let w = unrun_warnings(&e);
         assert_eq!(w.len(), 1);
-        assert!(w[0].contains("mod") && w[0].contains("exec-maven-plugin (exec at generate-sources)") && w[0].contains("docs/plugins.md"), "{}", w[0]);
+        assert!(
+            w[0].contains("mod")
+                && w[0].contains("exec-maven-plugin (exec at generate-sources)")
+                && w[0].contains("docs/plugins.md"),
+            "{}",
+            w[0]
+        );
         e.unrun.clear();
         assert!(unrun_warnings(&e).is_empty());
     }
