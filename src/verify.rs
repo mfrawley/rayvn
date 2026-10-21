@@ -82,6 +82,12 @@ fn console_launcher(repos: &Repos, resolved: &[Resolved]) -> Result<PathBuf> {
         .with_context(|| format!("junit-platform-console-standalone {} not found in any repository", engine.gav.version))
 }
 
+/// The test JVM runs in the module's directory, so every entry must be absolute: with a relative POM path
+/// (`rvn test` at a workspace root) `./mod/target/classes` would otherwise be looked up under `./mod/` again.
+fn absolute_classpath(entries: &[PathBuf]) -> Result<Vec<String>> {
+    entries.iter().map(|p| Ok(std::path::absolute(p)?.display().to_string())).collect()
+}
+
 fn java_command(classpath: &[String], jvm_args: &[String], classes: &[String]) -> Command {
     let mut cmd = Command::new("java");
     cmd.args(jvm_args);
@@ -228,8 +234,19 @@ impl Phase {
     }
 }
 
-/// Runs (or serves from the cache) the tests of `phase`. Returns false when nothing ran or was cached.
-pub fn run(phase: Phase, cx: &TestRun) -> Result<bool> {
+/// What a test phase did for one module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestOutcome {
+    /// The POM skips the phase, or no test class was selected.
+    NoTests,
+    /// The tests ran and passed (count of passed tests when JUnit reported it).
+    Passed(usize),
+    /// Served from the test cache: the inputs are unchanged since the last pass.
+    Cached(usize),
+}
+
+/// Runs (or serves from the cache) the tests of `phase`. A failure is an error.
+pub fn run(phase: Phase, cx: &TestRun) -> Result<TestOutcome> {
     let cfg = match phase {
         Phase::Unit => cx.root.surefire.clone(),
         Phase::Integration => cx.root.failsafe.clone(),
@@ -242,11 +259,11 @@ pub fn run(phase: Phase, cx: &TestRun) -> Result<bool> {
     let plan = match plan(phase, &cfg, cx.root, &sources, cx.settings, cx.rerun) {
         Selection::Skipped => {
             eprintln!("  {} skipped by the POM", phase.label());
-            return Ok(false);
+            return Ok(TestOutcome::NoTests);
         }
         Selection::Empty => {
             eprintln!("  no {} selected", phase.label());
-            return Ok(false);
+            return Ok(TestOutcome::NoTests);
         }
         Selection::Run(p) => p,
     };
@@ -261,10 +278,11 @@ pub fn run(phase: Phase, cx: &TestRun) -> Result<bool> {
             .collect(),
     });
     let launcher = console_launcher(cx.repos, cx.resolved)?;
-    let mut classpath = vec![cx.test_classes.display().to_string(), cx.main_classes.display().to_string()];
-    classpath.extend(cx.resolved.iter().filter_map(|r| r.jar.as_ref().map(|p| p.display().to_string())));
+    let mut classpath = vec![cx.test_classes.to_path_buf(), cx.main_classes.to_path_buf()];
+    classpath.extend(cx.resolved.iter().filter_map(|r| r.jar.clone()));
     // Last, so the project's own JUnit jars win; both are the same version.
-    classpath.push(launcher.display().to_string());
+    classpath.push(launcher);
+    let classpath = absolute_classpath(&classpath)?;
 
     let shards = testcache::split_shards(&plan.classes, plan.shards);
     let store = cache_dir(cx.cache_flag, std::env::var("RAYVN_TEST_CACHE").ok().as_deref(), cx.settings.cache_dir.as_deref(), cx.dir);
@@ -278,11 +296,17 @@ pub fn run(phase: Phase, cx: &TestRun) -> Result<bool> {
         })
     })?;
     match verdict {
-        Verdict::Cached(r) => eprintln!("  {} up to date: {} passed (cached, inputs unchanged; --rerun to force)", phase.label(), r.summary.successful),
-        Verdict::Ran(o) if o.success => eprintln!("  {} passed{}", phase.label(), o.summary.map(|s| format!(": {}", s.successful)).unwrap_or_default()),
+        Verdict::Cached(r) => {
+            eprintln!("  {} up to date: {} passed (cached, inputs unchanged; --rerun to force)", phase.label(), r.summary.successful);
+            Ok(TestOutcome::Cached(r.summary.successful))
+        }
+        Verdict::Ran(o) if o.success => {
+            let passed = o.summary.map(|s| s.successful);
+            eprintln!("  {} passed{}", phase.label(), passed.map(|n| format!(": {n}")).unwrap_or_default());
+            Ok(TestOutcome::Passed(passed.unwrap_or(0)))
+        }
         Verdict::Ran(_) => bail!("{} failed", phase.label()),
     }
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -332,6 +356,13 @@ mod tests {
         };
         assert!(skipped(&TestCfg { skips: vec!["${skipITs}".into()], ..Default::default() }, &root));
         assert!(!skipped(&TestCfg { skips: vec!["${unset}".into(), "false".into()], ..Default::default() }, &root));
+    }
+
+    #[test]
+    fn classpath_entries_are_made_absolute_so_they_survive_a_change_of_directory() {
+        let cp = absolute_classpath(&[PathBuf::from("./mod/target/classes"), PathBuf::from("/abs/a.jar")]).unwrap();
+        assert!(Path::new(&cp[0]).is_absolute() && cp[0].ends_with("mod/target/classes"), "{}", cp[0]);
+        assert_eq!(cp[1], "/abs/a.jar");
     }
 
     #[test]

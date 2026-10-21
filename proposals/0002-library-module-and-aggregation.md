@@ -106,6 +106,10 @@ allow = ["org.matsim:matsim"]
 
 `check` first. Gradle: one version per configuration by default, `failOnVersionConflict()`, platforms for alignment. Bazel: one version per artifact is the rule (`maven_install` per repo to opt out). uv: one lock for the workspace, resolved together. Nix: separate store paths, which does not help on a single classpath.
 
+### Tests across the workspace
+
+`rvn test` at the root of the transport-modeling workspace runs the 3 modules that have tests (matsim-moia 15, routing-map-conversion 4, 21 modules have none) and reports a per-module table; a second run is served from the test cache (28.8 s total, mostly resolving and compiling). Fixed on the way: the test JVM runs in the module directory, so a relative classpath from a root-level `-f pom.xml` failed with `ClassNotFoundException`; entries are now absolute.
+
 ### Bumping a dependency across modules (0-day response)
 
 Moved to its own proposal: `0003-bump.md`.

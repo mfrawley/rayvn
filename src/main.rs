@@ -120,7 +120,7 @@ fn resolve_lines(resolved: &[resolve::Resolved]) -> Vec<String> {
 
 /// What `args.cmd` does for one module, once its dependencies are known. Returns `false` when nothing was built
 /// (so there is nothing to report).
-fn run_module(args: &Args, module: &reactor::Module, resolved: &[resolve::Resolved], provides_tests: bool, cx: &Services) -> Result<()> {
+fn run_module(args: &Args, module: &reactor::Module, resolved: &[resolve::Resolved], provides_tests: bool, cx: &Services) -> Result<Vec<verify::TestOutcome>> {
     let (root, dir) = (&module.effective, module.dir.as_path());
     match args.cmd.as_str() {
         "lock" | "fetch" => {}
@@ -135,7 +135,8 @@ fn run_module(args: &Args, module: &reactor::Module, resolved: &[resolve::Resolv
                 if provides_tests {
                     verify::compile_tests(root, dir, &main_classes, resolved)?;
                 }
-                return build::package(root, dir, &main_classes, resolved);
+                build::package(root, dir, &main_classes, resolved)?;
+                return Ok(vec![]);
             }
             let test_classes = verify::compile_tests(root, dir, &main_classes, resolved)?;
             let run = verify::TestRun {
@@ -149,15 +150,40 @@ fn run_module(args: &Args, module: &reactor::Module, resolved: &[resolve::Resolv
                 rerun: args.rerun,
                 cache_flag: args.test_cache.as_deref(),
             };
-            verify::run(verify::Phase::Unit, &run)?;
+            let mut outcomes = vec![verify::run(verify::Phase::Unit, &run)?];
             if args.cmd == "verify" {
                 build::package(root, dir, &main_classes, resolved)?;
-                verify::run(verify::Phase::Integration, &run)?;
+                outcomes.push(verify::run(verify::Phase::Integration, &run)?);
             }
+            return Ok(outcomes);
         }
         _ => unreachable!(),
     }
-    Ok(())
+    Ok(vec![])
+}
+
+/// The closing table of a multi-module `test` or `verify`: one line per module and a total.
+fn test_report(rows: &[(String, Vec<verify::TestOutcome>)]) -> Vec<String> {
+    use verify::TestOutcome::*;
+    let (mut ran, mut cached, mut modules_with_tests) = (0, 0, 0);
+    let mut lines = vec!["tests by module:".to_string()];
+    for (name, outcomes) in rows {
+        let (r, c) = outcomes.iter().fold((0, 0), |(r, c), o| match o {
+            Passed(n) => (r + n, c),
+            Cached(n) => (r, c + n),
+            NoTests => (r, c),
+        });
+        if r + c == 0 {
+            continue;
+        }
+        modules_with_tests += 1;
+        ran += r;
+        cached += c;
+        lines.push(format!("  {name}: {} passed{}", r + c, if c > 0 { format!(" ({c} cached)") } else { String::new() }));
+    }
+    let silent = rows.len() - modules_with_tests;
+    lines.push(format!("  total: {} passed in {modules_with_tests} modules ({cached} cached); {silent} modules have no tests", ran + cached));
+    lines
 }
 
 struct Services<'a> {
@@ -233,6 +259,7 @@ fn run() -> Result<()> {
     );
     let test_providers = reactor::test_class_providers(&modules, &selected);
     let services = Services { repos: &repos, config: &config };
+    let mut test_rows = vec![];
     for &i in &selected {
         let module = &modules[i];
         if many {
@@ -242,7 +269,11 @@ fn run() -> Result<()> {
         let resolved = dependencies(&args, module, &lock_hash, &repos, &loader)?;
         let direct = resolved.iter().filter(|r| r.depth == 1).count();
         eprintln!("  {} artifacts ({direct} direct): {}", resolved.len(), repos.summary());
-        run_module(&args, module, &resolved, test_providers.contains(&i), &services)?;
+        let outcomes = run_module(&args, module, &resolved, test_providers.contains(&i), &services)?;
+        test_rows.push((module.name().to_string(), outcomes));
+    }
+    if many && matches!(args.cmd.as_str(), "test" | "verify") {
+        test_report(&test_rows).iter().for_each(|l| eprintln!("{l}"));
     }
     eprintln!("done in {:?}", t0.elapsed());
     if let Some(d) = cold_dir {
@@ -299,6 +330,20 @@ mod tests {
         assert_eq!(parse(&["test", "--module", "core"]).unwrap().unwrap().module.as_deref(), Some("core"));
         assert_eq!(parse(&["test"]).unwrap().unwrap().module, None);
         assert!(parse(&["test", "-m"]).is_err());
+    }
+
+    #[test]
+    fn the_test_report_lists_modules_with_tests_and_counts_the_rest() {
+        use verify::TestOutcome::*;
+        let rows = vec![
+            ("a".to_string(), vec![Passed(3)]),
+            ("b".to_string(), vec![NoTests]),
+            ("c".to_string(), vec![Cached(4), Passed(1)]),
+        ];
+        assert_eq!(
+            test_report(&rows),
+            ["tests by module:", "  a: 3 passed", "  c: 5 passed (4 cached)", "  total: 8 passed in 2 modules (4 cached); 1 modules have no tests"]
+        );
     }
 
     #[test]

@@ -20,6 +20,16 @@ A POM that lists `<modules>` makes a workspace. Run `rvn` at the root, or with `
 - **Aggregators.** A `pom`-packaged module that lists modules builds nothing.
 - **One lock per module**, `<module>/rayvn.lock`, no root lock. A sibling is recorded as `workspace = true` with no checksum. A module's lock goes stale when the POMs of the module, its parents on disk, or any module it depends on (directly or not) change; a change elsewhere leaves it alone.
 - **The test cache** hashes a sibling by its class tree, so editing `core` re-runs `app`'s tests.
+- **`rvn test` / `rvn verify` at the root** run each module's tests in build order, from the module's own directory (classpath entries are absolute, so this works however the POM was named). A module without test sources is skipped. A failing module stops the run. The run ends with a table, for example:
+
+  ```
+  tests by module:
+    matsim-moia: 15 passed (15 cached)
+    routing-map-conversion: 4 passed
+    total: 19 passed in 2 modules (15 cached); 21 modules have no tests
+  ```
+
+  Gradle runs `gradle test` per project with task-level caching and `--continue` to go past failures; Bazel runs `bazel test //...` with a result cache and `--keep_going`. rayvn matches the caching; continuing past a failure is not implemented yet.
 
 ## Leaving modules out
 
