@@ -2,8 +2,8 @@
 //!
 //! # Architecture
 //!
-//! `rvn` is a thin command-line wrapper (`src/main.rs`) over the modules below. A run goes through these modules
-//! in order:
+//! `rvn` is a thin command-line wrapper (`src/main.rs`) over the modules below. `cli` defines the commands, flags
+//! and `--help` text (with `clap`). A run goes through these modules in order:
 //!
 //! 1. `settings`: read `settings.xml`, `~/.rayvn/config.toml` and `rayvn.toml` (repositories, mirrors,
 //!    credentials, routes, hints).
@@ -16,22 +16,26 @@
 //!    bookkeeping lives in one file, see `index`.
 //! 6. `lock`: write or read `rayvn.lock`, which pins versions, repositories and checksums.
 //! 7. `build`: compile with `javac` and package the jar (shaded when the POM asks for it).
-//! 8. `verify` and `testcache`: compile the tests and run them with JUnit, selected as surefire and failsafe
-//!    would, sharded across JVMs and skipped when nothing they depend on has changed.
+//! 8. `verify`, `testcache` and `reports`: compile the tests and run them with JUnit, selected as surefire and
+//!    failsafe would, sharded across JVMs and skipped when nothing they depend on has changed; the results are
+//!    written as JUnit XML where CI systems expect them.
 //!
 //! Credentials never appear in these types as plain config values; `secret` resolves them from the
 //! environment or a helper command at the moment of use.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
+use cli::{Args, Cmd};
 use std::path::PathBuf;
 use std::time::Instant;
 
 mod build;
+mod cli;
 mod index;
 mod lock;
 mod model;
 mod pom;
 mod reactor;
+mod reports;
 mod repos;
 mod resolve;
 mod secret;
@@ -47,89 +51,12 @@ fn main() {
     }
 }
 
-const BANNER: &str = include_str!("../data/banner.txt");
-
 /// Printed to stdout, but only when stdout is a terminal, so piped output (`rvn classpath | ...`) stays clean.
 fn print_banner() {
     use std::io::IsTerminal;
     if std::io::stdout().is_terminal() && std::env::var_os("RAYVN_NO_BANNER").is_none() {
-        println!("{BANNER}");
-        println!("  {}\n", version());
-    }
-}
-
-const COMMANDS: [&str; 7] = [
-    "lock",
-    "fetch",
-    "resolve",
-    "classpath",
-    "build",
-    "test",
-    "verify",
-];
-const USAGE: &str = "usage: rvn <lock|fetch|resolve|classpath|build|test|verify> [-f pom.xml] [--locked] [--refresh] [--cold] [--rerun] [--test-cache dir] [-m module]";
-
-#[derive(Debug, PartialEq)]
-struct Args {
-    cmd: String,
-    pom_path: PathBuf,
-    locked: bool,
-    refresh: bool,
-    cold: bool,
-    test: bool,
-    rerun: bool,
-    test_cache: Option<String>,
-    module: Option<String>,
-}
-
-impl Args {
-    /// `None` for no or an unknown command (print usage).
-    fn parse(args: &[String]) -> Result<Option<Args>> {
-        let Some(cmd) = args.first().filter(|c| COMMANDS.contains(&c.as_str())) else {
-            return Ok(None);
-        };
-        let flag = |name: &str| args.iter().any(|a| a == name);
-        let pom_path = match args.iter().position(|a| a == "-f") {
-            Some(i) => PathBuf::from(args.get(i + 1).context("-f needs a path")?),
-            None => PathBuf::from("pom.xml"),
-        };
-        let test_cache = match args.iter().position(|a| a == "--test-cache") {
-            Some(i) => Some(
-                args.get(i + 1)
-                    .context("--test-cache needs a directory")?
-                    .clone(),
-            ),
-            None => None,
-        };
-        let module = match args.iter().position(|a| a == "-m" || a == "--module") {
-            Some(i) => Some(args.get(i + 1).context("-m needs a module name")?.clone()),
-            None => None,
-        };
-        let cold = flag("--cold");
-        if cold && cmd == "classpath" {
-            bail!(
-                "--cold deletes its cache afterwards, so `classpath` would print paths that no longer exist"
-            );
-        }
-        Ok(Some(Args {
-            cmd: cmd.clone(),
-            pom_path,
-            locked: flag("--locked"),
-            refresh: cold || flag("--refresh"),
-            cold,
-            test: flag("--test"),
-            rerun: flag("--rerun"),
-            test_cache,
-            module,
-        }))
-    }
-
-    fn project_dir(&self) -> PathBuf {
-        self.pom_path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
+        println!("{}", cli::BANNER);
+        println!("  rvn {}\n", cli::VERSION);
     }
 }
 
@@ -150,8 +77,8 @@ fn dependencies(
     loader: &model::Loader,
 ) -> Result<Vec<resolve::Resolved>> {
     let lock_path = module.lock_path();
-    let fetch = args.cmd == "fetch";
-    let fresh = if args.cmd == "lock" || (args.refresh && !fetch) {
+    let fetch = args.cmd == Cmd::Fetch;
+    let fresh = if args.cmd == Cmd::Lock || (args.refresh && !fetch) {
         None
     } else {
         lock::read_fresh(&lock_path, lock_hash)
@@ -230,11 +157,11 @@ fn run_module(
     cx: &Services,
 ) -> Result<Vec<verify::TestOutcome>> {
     let (root, dir) = (&module.effective, module.dir.as_path());
-    match args.cmd.as_str() {
-        "lock" | "fetch" => {}
-        "resolve" => resolve_lines(resolved).iter().for_each(|l| println!("{l}")),
-        "classpath" => println!("{}", classpath_line(resolved, args.test)),
-        "build" | "test" | "verify" => {
+    match args.cmd {
+        Cmd::Lock | Cmd::Fetch => {}
+        Cmd::Resolve => resolve_lines(resolved).iter().for_each(|l| println!("{l}")),
+        Cmd::Classpath => println!("{}", classpath_line(resolved, args.test)),
+        Cmd::Build | Cmd::Test | Cmd::Verify => {
             if root.packaging != "jar" {
                 bail!(
                     "packaging '{}' is not supported yet (only jar)",
@@ -243,7 +170,7 @@ fn run_module(
             }
             warn_unrun(root);
             let main_classes = build::compile_main(root, dir, resolved)?;
-            if args.cmd == "build" {
+            if args.cmd == Cmd::Build {
                 if provides_tests {
                     verify::compile_tests(root, dir, &main_classes, resolved)?;
                 }
@@ -261,15 +188,15 @@ fn run_module(
                 settings: &cx.config.test,
                 rerun: args.rerun,
                 cache_flag: args.test_cache.as_deref(),
+                reports_flag: args.reports_dir.as_deref(),
             };
             let mut outcomes = vec![verify::run(verify::Phase::Unit, &run)?];
-            if args.cmd == "verify" {
+            if args.cmd == Cmd::Verify {
                 build::package(root, dir, &main_classes, resolved)?;
                 outcomes.push(verify::run(verify::Phase::Integration, &run)?);
             }
             return Ok(outcomes);
         }
-        _ => unreachable!(),
     }
     Ok(vec![])
 }
@@ -314,10 +241,7 @@ struct Services<'a> {
 /// The modules `args` acts on, in build order, aggregators left out. Commands that only read dependencies
 /// (`lock`, `fetch`, `resolve`, `classpath`) take just the module named with `-m`; the others also build what it needs.
 fn pick(args: &Args, modules: &[reactor::Module]) -> Result<Vec<usize>> {
-    let only_named = matches!(
-        args.cmd.as_str(),
-        "lock" | "fetch" | "resolve" | "classpath"
-    );
+    let only_named = args.cmd.reads_dependencies_only();
     let chosen = match (&args.module, only_named) {
         (Some(m), true) => vec![reactor::find(modules, m)?],
         (m, _) => reactor::select(modules, m.as_deref())?,
@@ -341,20 +265,7 @@ fn run() -> Result<()> {
         .num_threads(32)
         .build_global()
         .ok();
-    let raw: Vec<String> = std::env::args().skip(1).collect();
-    if raw
-        .first()
-        .is_some_and(|a| matches!(a.as_str(), "--version" | "-V" | "version"))
-    {
-        println!("{}", version());
-        return Ok(());
-    }
-    let Some(args) = Args::parse(&raw)? else {
-        println!("{BANNER}");
-        println!("{}", version());
-        println!("{USAGE}");
-        return Ok(());
-    };
+    let args = Args::from_env()?;
     print_banner();
     let project_dir = args.project_dir();
     let t0 = Instant::now();
@@ -384,7 +295,7 @@ fn run() -> Result<()> {
     let edges = reactor::dependency_edges(&modules);
     let selected: Vec<usize> = pick(&args, &modules)?;
     let many = selected.len() > 1;
-    if many && args.cmd == "classpath" {
+    if many && args.cmd == Cmd::Classpath {
         bail!(
             "`classpath` prints one line; choose a module with -m ({})",
             selected
@@ -396,7 +307,7 @@ fn run() -> Result<()> {
     }
     eprintln!(
         "rvn {}: {} ({} repositories, {} routes{})",
-        args.cmd,
+        args.cmd.name(),
         args.pom_path.display(),
         repos.remote_count(),
         repos.route_count(),
@@ -434,7 +345,7 @@ fn run() -> Result<()> {
         )?;
         test_rows.push((module.name().to_string(), outcomes));
     }
-    if many && matches!(args.cmd.as_str(), "test" | "verify") {
+    if many && args.cmd.runs_tests() {
         test_report(&test_rows)
             .iter()
             .for_each(|l| eprintln!("{l}"));
@@ -446,104 +357,9 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-/// The one-line version string: package version, git commit, build time and a name derived from the commit.
-///
-/// A `-dirty` suffix on the commit means the working tree had uncommitted changes when it was built.
-pub fn version() -> String {
-    format!(
-        "rvn {} ({}, {}) \"{}\"",
-        env!("CARGO_PKG_VERSION"),
-        env!("RAYVN_COMMIT"),
-        env!("RAYVN_BUILT"),
-        env!("RAYVN_NAME")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_version_line_names_the_binary_and_the_package_version() {
-        let v = version();
-        assert!(v.starts_with("rvn "));
-        assert!(v.contains(env!("CARGO_PKG_VERSION")));
-    }
-
-    fn parse(args: &[&str]) -> Result<Option<Args>> {
-        Args::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
-    }
-
-    #[test]
-    fn no_or_unknown_command_means_usage() {
-        assert_eq!(parse(&[]).unwrap(), None);
-        assert_eq!(parse(&["frobnicate"]).unwrap(), None);
-    }
-
-    #[test]
-    fn flags_and_pom_path_are_parsed() {
-        let a = parse(&["build", "-f", "sub/pom.xml", "--locked", "--refresh"])
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (a.cmd.as_str(), a.locked, a.refresh, a.cold, a.test),
-            ("build", true, true, false, false)
-        );
-        assert_eq!(a.project_dir(), PathBuf::from("sub"));
-        assert_eq!(
-            parse(&["lock"]).unwrap().unwrap().project_dir(),
-            PathBuf::from(".")
-        );
-    }
-
-    #[test]
-    fn cold_implies_refresh_and_is_refused_for_classpath() {
-        let a = parse(&["lock", "--cold"]).unwrap().unwrap();
-        assert!(a.cold && a.refresh);
-        assert!(parse(&["classpath", "--cold"]).is_err());
-    }
-
-    #[test]
-    fn rerun_flag_is_parsed() {
-        assert!(parse(&["test", "--rerun"]).unwrap().unwrap().rerun);
-        assert!(!parse(&["test"]).unwrap().unwrap().rerun);
-    }
-
-    #[test]
-    fn test_cache_flag_takes_a_directory() {
-        assert_eq!(
-            parse(&["test", "--test-cache", "/ci"])
-                .unwrap()
-                .unwrap()
-                .test_cache
-                .as_deref(),
-            Some("/ci")
-        );
-        assert_eq!(parse(&["test"]).unwrap().unwrap().test_cache, None);
-        assert!(parse(&["test", "--test-cache"]).is_err());
-    }
-
-    #[test]
-    fn module_flag_takes_a_name() {
-        assert_eq!(
-            parse(&["test", "-m", "core"])
-                .unwrap()
-                .unwrap()
-                .module
-                .as_deref(),
-            Some("core")
-        );
-        assert_eq!(
-            parse(&["test", "--module", "core"])
-                .unwrap()
-                .unwrap()
-                .module
-                .as_deref(),
-            Some("core")
-        );
-        assert_eq!(parse(&["test"]).unwrap().unwrap().module, None);
-        assert!(parse(&["test", "-m"]).is_err());
-    }
 
     #[test]
     fn the_test_report_lists_modules_with_tests_and_counts_the_rest() {
@@ -591,10 +407,5 @@ mod tests {
         );
         e.unrun.clear();
         assert!(unrun_warnings(&e).is_empty());
-    }
-
-    #[test]
-    fn dash_f_needs_a_path() {
-        assert!(parse(&["lock", "-f"]).is_err());
     }
 }

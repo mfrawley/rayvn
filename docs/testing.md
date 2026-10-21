@@ -8,7 +8,7 @@ same tests itself, with the JUnit Platform Console Launcher.
 | `rvn test` | Compile `src/main/java`, then `src/test/java`; run the unit tests. |
 | `rvn verify` | `rvn test`, then package the jar (shaded if configured), then run the integration tests. |
 
-Both take `--rerun` (ignore the result cache for this run), `--test-cache <dir>` (see below) and the usual `-f`, `--locked`, `--refresh`.
+Both take `--rerun` (ignore the result cache for this run), `--test-cache <dir>` and `--reports-dir <dir>` (see below) and the usual `-f`, `--locked`, `--refresh`.
 
 ## Which tests run
 
@@ -24,6 +24,18 @@ As in Maven, taken from the POM:
 Only JUnit 5 (Jupiter) is supported. The Console Launcher is fetched at the version of the `junit-platform-engine`
 already in your dependencies; add `junit-jupiter` as a test dependency. Options rayvn does not implement
 (`groups`, `forkCount`, `systemPropertyVariables`, ...) are printed as warnings, never silently dropped.
+
+## JUnit XML reports
+
+Every run writes JUnit XML where Maven would: `target/surefire-reports/` for unit tests and `target/failsafe-reports/` for integration tests, in each module. CI systems that already read Maven's reports (Jenkins `junit`, GitLab `artifacts:reports:junit`, GitHub test reporters, IDEs) need no change: point them at `**/surefire-reports/TEST-*.xml` as before.
+
+- One file per test JVM: `TEST-junit-jupiter.xml`, or `TEST-junit-jupiter-1.xml`, `-2.xml`, ... when `shards` is set. Each JVM writes into a private directory first, so parallel shards cannot overwrite each other.
+- The reports of an earlier run are removed before the next run, so a report never lists tests that no longer exist.
+- A result served from the cache starts no JVM, so the XML of the run it stands for is stored beside the cache record (`<group>.<artifact>.<phase>.reports/`) and copied back. The report is there on exactly the runs where the cache works. A record from before reports existed has no XML to copy and is treated as a miss, so the tests run once more.
+- `--reports-dir <dir>` writes `<dir>/surefire-reports` and `<dir>/failsafe-reports` instead of `target/`. In a multi-module build every module writes to the same directory, so use it for a single module (`-m`) or leave the default.
+- Failed runs keep their reports (that is when you need them) but are never stored in the cache.
+
+The XML is the Console Launcher's own (`--reports-dir`), in the Open Test Reporting-compatible "legacy" format that surefire's tooling reads.
 
 ## Result cache
 
@@ -66,4 +78,5 @@ Start-up of a JVM and shared static state in tests are the costs; a few slow cla
 
 - **Gradle:** the `test` task is up to date when its declared inputs are unchanged, and failed runs are not cached. It forks worker JVMs with `maxParallelForks`. Inputs are whatever plugin authors and you annotate; nothing enforces them.
 - **Bazel:** each `java_test` is a cached action. A sandbox makes the declared inputs the only inputs, so an undeclared read fails. `shard_count` splits one target.
+- **Reports:** Maven's surefire writes `target/surefire-reports/TEST-*.xml` and rayvn uses the same paths. Gradle writes `build/test-results/test/*.xml` and replays them when the task is up to date from its build cache. Bazel writes one `test.xml` per target under `bazel-testlogs/` and streams it to the build event service. Replay on a cache hit is what Gradle and Bazel do and what rayvn does.
 - **rayvn:** Bazel's key and rule that failures are not cached, Gradle's trust in declared inputs (`inputs = [...]`) and no sandbox, so that a plain `pom.xml` keeps working.

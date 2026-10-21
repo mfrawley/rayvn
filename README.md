@@ -14,6 +14,8 @@ Compatibility is judged by results (same classpath, same jar contents), not by r
 rvn <command> [-f pom.xml] [-m module] [--locked] [--refresh] [--cold]
 ```
 
+`rvn --help` lists the commands and the environment variables; `rvn <command> --help` shows that command's flags with examples. A flag that means nothing for a command (`rvn classpath --rerun`) is an error, and a mistyped command gets a suggestion.
+
 | Command | What it does |
 |---|---|
 | `lock` | Resolve the dependencies and write `rayvn.lock` next to the POM. |
@@ -21,7 +23,7 @@ rvn <command> [-f pom.xml] [-m module] [--locked] [--refresh] [--cold]
 | `resolve` | Print the dependency tree, one line per artifact, indented by depth. |
 | `classpath` | Print the classpath as colon-separated jar paths. `--test` includes test scope. |
 | `build` | Compile and package the jar into `target/`; shaded if the POM configures `maven-shade-plugin`. Prints the jar path on stdout. |
-| `test` | Compile the tests and run the unit tests (surefire settings), skipping the run when nothing changed. See `docs/testing.md`. |
+| `test` | Compile the tests and run the unit tests (surefire settings), skipping the run when nothing changed. Writes JUnit XML to `target/surefire-reports/`. See `docs/testing.md`. |
 | `verify` | `test`, then package, then the integration tests (failsafe settings). |
 
 | Flag | Meaning |
@@ -32,6 +34,7 @@ rvn <command> [-f pom.xml] [-m module] [--locked] [--refresh] [--cold]
 | `--refresh` | Ignore `rayvn.lock` and the miss cache for this run; the lock is rewritten. |
 | `--test-cache <dir>` | `test`/`verify`: store test results here (also `RAYVN_TEST_CACHE`, `[test] cache_dir`). |
 | `--rerun` | `test`/`verify`: ignore the test result cache for this run. |
+| `--reports-dir <dir>` | `test`/`verify`: write JUnit XML to `<dir>/surefire-reports` and `<dir>/failsafe-reports` instead of `target/`. |
 | `--cold` | Use a throwaway cache, deleted afterwards. Implies `--refresh`. Not allowed with `classpath`. |
 
 Progress and summaries go to stderr and results to stdout, so output pipes cleanly.
@@ -61,6 +64,8 @@ Environment: `RAYVN_LOCAL_REPO` (cache location), `RAYVN_RO_REPO` (read-only cac
 git config core.hooksPath .githooks
 chmod +x .githooks/pre-commit scripts/check.sh
 ```
+
+`scripts/doc.sh` rebuilds the API docs (`target/doc/rayvn/index.html`) from scratch: it runs `cargo clean --doc` first, so pages for renamed or removed items do not linger.
 
 ## Where things are
 

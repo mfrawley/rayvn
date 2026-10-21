@@ -5,7 +5,8 @@ use anyhow::{Context, Result};
 use roxmltree::{Document, Node, ParsingOptions};
 use std::collections::BTreeMap;
 
-/// Maven coordinates: group, artifact and version.
+/// Maven's GAV: Group, Artifact, Version, the coordinates that identify an artifact,
+/// e.g. `com.google.guava:guava:33.0.0-jre`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Gav {
     pub group: String,

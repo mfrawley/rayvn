@@ -5,6 +5,7 @@
 use crate::build::{compile, copy_resources, glob, java_sources};
 use crate::model::{Effective, interpolate};
 use crate::pom::TestCfg;
+use crate::reports;
 use crate::repos::Repos;
 use crate::resolve::Resolved;
 use crate::settings::TestSettings;
@@ -128,7 +129,12 @@ fn absolute_classpath(entries: &[PathBuf]) -> Result<Vec<String>> {
         .collect()
 }
 
-fn java_command(classpath: &[String], jvm_args: &[String], classes: &[String]) -> Command {
+fn java_command(
+    classpath: &[String],
+    jvm_args: &[String],
+    classes: &[String],
+    reports: &Path,
+) -> Command {
     let mut cmd = Command::new("java");
     cmd.args(jvm_args);
     cmd.arg("-cp")
@@ -140,6 +146,7 @@ fn java_command(classpath: &[String], jvm_args: &[String], classes: &[String]) -
         "--details=summary",
         "--disable-ansi-colors",
     ]);
+    cmd.arg("--reports-dir").arg(reports);
     for c in classes {
         cmd.args(["--select-class", c]);
     }
@@ -322,9 +329,34 @@ pub struct TestRun<'a> {
     pub rerun: bool,
     /// Value of `--test-cache`, if given.
     pub cache_flag: Option<&'a str>,
+    /// Value of `--reports-dir`, if given.
+    pub reports_flag: Option<&'a str>,
+}
+
+/// Where the JUnit XML of `phase` goes: `<reports_flag>/<surefire|failsafe>-reports`, else
+/// `target/<surefire|failsafe>-reports` in the module. Absolute, because the test JVM runs in the module's directory.
+fn reports_dir(phase: Phase, flag: Option<&str>, module: &Path) -> Result<PathBuf> {
+    let base = match flag.filter(|f| !f.is_empty()) {
+        Some(f) => PathBuf::from(f),
+        None => module.join("target"),
+    };
+    Ok(std::path::absolute(base.join(phase.reports_name()))?)
+}
+
+/// Where the reports of the run a cache record stands for are kept: beside the record, named after it.
+fn stored_reports(store: &Path, record: &str) -> PathBuf {
+    store.join(format!("{record}.reports"))
 }
 
 impl Phase {
+    /// Directory name for this phase's JUnit XML, as Maven names it.
+    fn reports_name(self) -> &'static str {
+        match self {
+            Phase::Unit => "surefire-reports",
+            Phase::Integration => "failsafe-reports",
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Phase::Unit => "unit",
@@ -393,40 +425,54 @@ pub fn run(phase: Phase, cx: &TestRun) -> Result<TestOutcome> {
         cx.settings.cache_dir.as_deref(),
         cx.dir,
     );
-    let verdict = testcache::run_cached(
-        &store,
-        &record_name(cx.root, phase),
-        &key,
-        plan.use_cache,
-        || {
-            eprintln!(
-                "  running {} {} with JUnit in {} JVM(s)",
-                plan.classes.len(),
-                phase.label(),
-                shards.len()
-            );
-            testcache::run_shards(&shards, |i, classes| {
-                let prefix = if shards.len() > 1 {
-                    format!("[{}] ", i + 1)
-                } else {
-                    String::new()
-                };
-                let mut cmd = java_command(&classpath, &plan.jvm_args, classes);
-                cmd.current_dir(cx.dir);
-                run_command(cmd, &prefix)
-            })
-        },
-    )?;
+    let record = record_name(cx.root, phase);
+    let reports = reports_dir(phase, cx.reports_flag, cx.dir)?;
+    let stored = stored_reports(&store, &record);
+    // A record without stored XML (written before reports existed) would leave CI with nothing to read.
+    let use_cache = plan.use_cache && !reports::files(&stored)?.is_empty();
+    let verdict = testcache::run_cached(&store, &record, &key, use_cache, || {
+        eprintln!(
+            "  running {} {} with JUnit in {} JVM(s)",
+            plan.classes.len(),
+            phase.label(),
+            shards.len()
+        );
+        reports::clear(&reports)?;
+        testcache::run_shards(&shards, |i, classes| {
+            let prefix = if shards.len() > 1 {
+                format!("[{}] ", i + 1)
+            } else {
+                String::new()
+            };
+            let private = reports::shard_dir(&reports, i);
+            std::fs::create_dir_all(&private)?;
+            let mut cmd = java_command(&classpath, &plan.jvm_args, classes, &private);
+            cmd.current_dir(cx.dir);
+            let outcome = run_command(cmd, &prefix);
+            reports::collect(&reports, i, shards.len())?;
+            outcome
+        })
+    })?;
     match verdict {
         Verdict::Cached(r) => {
+            let n = reports::copy_set(&stored, &reports)?;
             eprintln!(
                 "  {} up to date: {} passed (cached, inputs unchanged; --rerun to force)",
                 phase.label(),
                 r.summary.successful
             );
+            eprintln!("  {}", reports_line(n, &reports));
             Ok(TestOutcome::Cached(r.summary.successful))
         }
-        Verdict::Ran(o) if o.success => {
+        Verdict::Ran(o) => {
+            let n = reports::files(&reports)?.len();
+            eprintln!("  {}", reports_line(n, &reports));
+            if !o.success {
+                bail!("{} failed", phase.label());
+            }
+            if o.summary.is_some() {
+                reports::copy_set(&reports, &stored)?;
+            }
             let passed = o.summary.map(|s| s.successful);
             eprintln!(
                 "  {} passed{}",
@@ -435,7 +481,14 @@ pub fn run(phase: Phase, cx: &TestRun) -> Result<TestOutcome> {
             );
             Ok(TestOutcome::Passed(passed.unwrap_or(0)))
         }
-        Verdict::Ran(_) => bail!("{} failed", phase.label()),
+    }
+}
+
+fn reports_line(count: usize, dir: &Path) -> String {
+    match count {
+        0 => format!("no JUnit XML written to {}", dir.display()),
+        1 => format!("JUnit XML: {}", dir.display()),
+        n => format!("JUnit XML: {n} files in {}", dir.display()),
     }
 }
 
@@ -544,6 +597,7 @@ mod tests {
             &["a".into(), "b".into()],
             &["-Xmx1g".into()],
             &["x.A".into(), "x.B".into()],
+            Path::new("/r"),
         );
         let args: Vec<_> = cmd
             .get_args()
@@ -562,6 +616,46 @@ mod tests {
             &args[args.len() - 4..],
             ["--select-class", "x.A", "--select-class", "x.B"]
         );
+        let at = args.iter().position(|a| a == "--reports-dir").unwrap();
+        assert_eq!(args[at + 1], "/r");
+    }
+
+    #[test]
+    fn reports_go_where_maven_puts_them_unless_redirected() {
+        let module = Path::new("/w/mod");
+        assert_eq!(
+            reports_dir(Phase::Unit, None, module).unwrap(),
+            Path::new("/w/mod/target/surefire-reports")
+        );
+        assert_eq!(
+            reports_dir(Phase::Integration, None, module).unwrap(),
+            Path::new("/w/mod/target/failsafe-reports")
+        );
+        assert_eq!(
+            reports_dir(Phase::Unit, Some("/ci/out"), module).unwrap(),
+            Path::new("/ci/out/surefire-reports")
+        );
+        assert_eq!(
+            reports_dir(Phase::Unit, Some(""), module).unwrap(),
+            Path::new("/w/mod/target/surefire-reports"),
+            "an empty value counts as unset"
+        );
+    }
+
+    #[test]
+    fn stored_reports_sit_beside_the_record_they_belong_to() {
+        assert_eq!(
+            stored_reports(Path::new("/c"), "g.a.unit"),
+            Path::new("/c/g.a.unit.reports")
+        );
+    }
+
+    #[test]
+    fn the_reports_line_says_how_many_files_and_where() {
+        let d = Path::new("/r");
+        assert_eq!(reports_line(0, d), "no JUnit XML written to /r");
+        assert_eq!(reports_line(1, d), "JUnit XML: /r");
+        assert_eq!(reports_line(3, d), "JUnit XML: 3 files in /r");
     }
 
     fn root_with(props: &[(&str, &str)]) -> Effective {
