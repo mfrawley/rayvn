@@ -229,8 +229,16 @@ pub(crate) fn glob(pat: &str, s: &str) -> bool {
     go(pat.as_bytes(), s.as_bytes())
 }
 
+/// Shade artifact patterns (`*:*`, `org.foo:*`): `*` matches any run of characters, `:` included.
+fn artifact_matches(pat: &str, ga: &str) -> bool {
+    match pat.split_once('*') {
+        None => pat == ga,
+        Some((head, tail)) => ga.strip_prefix(head).is_some_and(|rest| (0..=rest.len()).filter(|&i| rest.is_char_boundary(i)).any(|i| artifact_matches(tail, &rest[i..]))),
+    }
+}
+
 fn excluded(cfg: &ShadeCfg, ga: &str, name: &str) -> bool {
-    cfg.excludes.iter().any(|(art, ex)| glob(&art.replace('*', "**"), ga) && ex.iter().any(|g| glob(g, name) || glob(&format!("{g}/**"), name)))
+    cfg.excludes.iter().any(|(art, ex)| artifact_matches(art, ga) && ex.iter().any(|g| glob(g, name) || glob(&format!("{g}/**"), name)))
 }
 
 const MANIFEST: &str = "META-INF/MANIFEST.MF";
@@ -355,6 +363,30 @@ mod tests {
             assert!(skip_entry(&cfg(), "g:a", name, &seen), "{name}");
         }
         assert!(!skip_entry(&cfg(), "g:a", "a/C.class", &seen));
+    }
+
+    #[test]
+    fn artifact_patterns_use_star_for_any_run_including_the_colon() {
+        for (pat, ga, ok) in [
+            ("*:*", "org.eclipse.emf:common", true),
+            ("org.eclipse.*:*", "org.eclipse.emf:common", true),
+            ("org.eclipse.emf:*", "org.eclipse.emf:common", true),
+            ("org.eclipse.emf:*", "org.eclipse.xsd:common", false),
+            ("g:a", "g:a", true),
+            ("g:a", "g:ab", false),
+            ("*:common", "g:common", true),
+        ] {
+            assert_eq!(artifact_matches(pat, ga), ok, "{pat} vs {ga}");
+        }
+    }
+
+    #[test]
+    fn a_wildcard_filter_drops_signature_files_from_every_dependency() {
+        let cfg = ShadeCfg { excludes: vec![("*:*".into(), vec!["META-INF/*.SF".into(), "META-INF/*.RSA".into()])], ..Default::default() };
+        let none = HashSet::new();
+        assert!(skip_entry(&cfg, "org.eclipse.emf:common", "META-INF/ECLIPSE_.SF", &none));
+        assert!(skip_entry(&cfg, "org.eclipse.emf:common", "META-INF/ECLIPSE_.RSA", &none));
+        assert!(!skip_entry(&cfg, "org.eclipse.emf:common", "META-INF/services/x", &none));
     }
 
     #[test]
