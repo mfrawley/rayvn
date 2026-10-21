@@ -4,16 +4,48 @@
 use std::process::Command;
 
 const ADJECTIVES: [&str; 16] = [
-    "Gloomy", "Curious", "Nimble", "Sardonic", "Mournful", "Cunning", "Glossy", "Restless",
-    "Pensive", "Mischievous", "Midnight", "Wily", "Austere", "Whimsical", "Stoic", "Raucous",
+    "Gloomy",
+    "Curious",
+    "Nimble",
+    "Sardonic",
+    "Mournful",
+    "Cunning",
+    "Glossy",
+    "Restless",
+    "Pensive",
+    "Mischievous",
+    "Midnight",
+    "Wily",
+    "Austere",
+    "Whimsical",
+    "Stoic",
+    "Raucous",
 ];
 const NOUNS: [&str; 16] = [
-    "Quill", "Inkwell", "Lenore", "Chamber", "Bust of Pallas", "Tapping", "Nevermore", "Hatter",
-    "Desk", "Lectern", "Parchment", "Cawing", "Shadow", "Casement", "Tea Party", "Manuscript",
+    "Quill",
+    "Inkwell",
+    "Lenore",
+    "Chamber",
+    "Bust of Pallas",
+    "Tapping",
+    "Nevermore",
+    "Hatter",
+    "Desk",
+    "Lectern",
+    "Parchment",
+    "Cawing",
+    "Shadow",
+    "Casement",
+    "Tea Party",
+    "Manuscript",
 ];
 
 fn git(args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).output().ok().filter(|o| o.status.success())?;
+    let out = Command::new("git")
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
@@ -33,7 +65,11 @@ fn civil(days: i64) -> (i64, i64, i64) {
 fn utc(secs: i64) -> String {
     let (y, m, d) = civil(secs.div_euclid(86_400));
     let rem = secs.rem_euclid(86_400);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 3600, rem % 3600 / 60)
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        rem / 3600,
+        rem % 3600 / 60
+    )
 }
 
 fn name_for(commit: &str) -> String {
@@ -43,18 +79,32 @@ fn name_for(commit: &str) -> String {
 
 fn main() {
     // SOURCE_DATE_EPOCH keeps reproducible builds reproducible.
-    let secs = std::env::var("SOURCE_DATE_EPOCH").ok().and_then(|s| s.parse::<i64>().ok()).unwrap_or_else(|| {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
-    });
+    let secs = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64)
+        });
     let commit = match git(&["rev-parse", "--short=7", "HEAD"]) {
-        Some(c) if git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty()) => format!("{c}-dirty"),
+        Some(c) if git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty()) => {
+            format!("{c}-dirty")
+        }
         Some(c) => c,
         None => "unknown".to_string(),
     };
     println!("cargo:rustc-env=RAYVN_COMMIT={commit}");
     println!("cargo:rustc-env=RAYVN_BUILT={}", utc(secs));
     println!("cargo:rustc-env=RAYVN_NAME={}", name_for(&commit));
-    for p in ["build.rs", "src", "data", "Cargo.toml", ".git/HEAD", ".git/index"] {
+    for p in [
+        "build.rs",
+        "src",
+        "data",
+        "Cargo.toml",
+        ".git/HEAD",
+        ".git/index",
+    ] {
         println!("cargo:rerun-if-changed={p}");
     }
 }
