@@ -77,10 +77,6 @@ impl LocalModules {
         self.modules.get(gav)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.modules.is_empty()
-    }
-
     /// The directory that stands in for the artifact: the classes for the plain jar, the test classes for the
     /// `tests` classifier. `None` for the module's other classifiers, and for artifacts that are not modules.
     pub fn output(&self, gav: &Gav, classifier: Option<&str>, typ: &str) -> Option<PathBuf> {
@@ -117,7 +113,7 @@ impl<'a> Loader<'a> {
         &self.locals
     }
 
-    pub fn from_file(&self, path: &Path) -> Result<Effective> {
+    pub fn load_file(&self, path: &Path) -> Result<Effective> {
         let xml =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let raw = pom::parse(&xml).with_context(|| path.display().to_string())?;
@@ -345,16 +341,6 @@ fn merge_unrun(inherited: &[String], own: Vec<String>) -> Vec<String> {
 }
 
 /// Replaces `${key}` from `props`, repeatedly (properties may refer to properties); unknown keys stay as written.
-///
-/// ```
-/// use std::collections::BTreeMap;
-/// let props = BTreeMap::from([
-///     ("v".to_string(), "1.2".to_string()),
-///     ("full".to_string(), "lib-${v}".to_string()),
-/// ]);
-/// assert_eq!(rayvn::model::interpolate("${full}.jar", &props), "lib-1.2.jar");
-/// assert_eq!(rayvn::model::interpolate("${missing}", &props), "${missing}");
-/// ```
 pub fn interpolate(s: &str, props: &BTreeMap<String, String>) -> String {
     let mut cur = s.to_string();
     for _ in 0..16 {
@@ -444,6 +430,16 @@ pub fn local_poms(pom_path: &Path) -> Result<LocalPoms> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interpolate_expands_nested_properties_and_keeps_unknown_ones() {
+        let props = BTreeMap::from([
+            ("v".to_string(), "1.2".to_string()),
+            ("full".to_string(), "lib-${v}".to_string()),
+        ]);
+        assert_eq!(interpolate("${full}.jar", &props), "lib-1.2.jar");
+        assert_eq!(interpolate("${missing}", &props), "${missing}");
+    }
 
     fn dep(artifact: &str, version: Option<&str>) -> Dep {
         Dep {
@@ -560,7 +556,6 @@ mod tests {
     #[test]
     fn local_modules_stand_in_for_the_jar_and_the_test_jar_only() {
         let mut locals = LocalModules::default();
-        assert!(locals.is_empty());
         locals.register(
             effective(Gav::new("g", "lib", "1"), &[], vec![]),
             Path::new("/w/lib"),
@@ -580,7 +575,7 @@ mod tests {
             None,
             "another version is not the module"
         );
-        assert!(locals.get(&gav).is_some() && !locals.is_empty());
+        assert!(locals.get(&gav).is_some());
     }
 
     #[test]

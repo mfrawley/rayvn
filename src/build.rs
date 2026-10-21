@@ -65,11 +65,6 @@ pub(crate) fn clean_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn build(root: &Effective, dir: &Path, resolved: &[Resolved]) -> Result<()> {
-    let classes = compile_main(root, dir, resolved)?;
-    package(root, dir, &classes, resolved)
-}
-
 /// Writes the jar from `classes`, shaded as the POM configures, and prints its path.
 pub fn package(root: &Effective, dir: &Path, classes: &Path, resolved: &[Resolved]) -> Result<()> {
     let target = dir.join("target");

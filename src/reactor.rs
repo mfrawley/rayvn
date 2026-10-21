@@ -141,7 +141,7 @@ pub fn load(found: Vec<Found>, loader: &Loader) -> Result<Vec<Module>> {
         .into_iter()
         .map(|f| {
             Ok(Module {
-                effective: loader.from_file(&f.pom_path)?,
+                effective: loader.load_file(&f.pom_path)?,
                 pom_files: f.poms.files,
                 modules: f.modules,
                 dir: f.dir,

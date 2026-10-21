@@ -52,13 +52,6 @@ fn is_false(b: &bool) -> bool {
 }
 
 /// Lower-case hex SHA-256, used for both the POM fingerprint and artifact checksums.
-///
-/// ```
-/// assert_eq!(
-///     rayvn::lock::hash_bytes(b"abc"),
-///     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-/// );
-/// ```
 pub fn hash_bytes(b: &[u8]) -> String {
     crate::repos::hex(&Sha256::digest(b))
 }
@@ -249,6 +242,14 @@ pub fn verify(lock: &Lock, resolved: &[Resolved]) -> Result<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_bytes_is_lower_case_hex_sha256() {
+        assert_eq!(
+            hash_bytes(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     fn resolved(repo: Option<&str>) -> Resolved {
         Resolved {

@@ -1,10 +1,44 @@
-//! The `rvn` command line. All logic lives in the [`rayvn`] library; this file parses arguments and sequences
-//! the steps.
+//! The `rvn` command line: parses arguments and sequences the steps. See the README for usage.
+//!
+//! # Architecture
+//!
+//! `rvn` is a thin command-line wrapper (`src/main.rs`) over the modules below. A run goes through these modules
+//! in order:
+//!
+//! 1. `settings`: read `settings.xml`, `~/.rayvn/config.toml` and `rayvn.toml` (repositories, mirrors,
+//!    credentials, routes, hints).
+//! 2. `pom` and `model`: parse `pom.xml`, then build the effective model (parents, BOM imports,
+//!    properties, dependency management).
+//! 3. `reactor`: for a POM with `<modules>`, find the modules, order them by their dependencies on each other and
+//!    resolve a sibling to its build output; each module is then locked and built on its own.
+//! 4. `resolve`: walk the dependency graph with Maven's mediation rules, fetching POMs through `repos`.
+//! 5. `repos`: ask repositories (routed, hinted, cached, with a miss cache) and keep the local cache;
+//!    bookkeeping lives in one file, see `index`.
+//! 6. `lock`: write or read `rayvn.lock`, which pins versions, repositories and checksums.
+//! 7. `build`: compile with `javac` and package the jar (shaded when the POM asks for it).
+//! 8. `verify` and `testcache`: compile the tests and run them with JUnit, selected as surefire and failsafe
+//!    would, sharded across JVMs and skipped when nothing they depend on has changed.
+//!
+//! Credentials never appear in these types as plain config values; `secret` resolves them from the
+//! environment or a helper command at the moment of use.
 
 use anyhow::{Context, Result, bail};
-use rayvn::{build, lock, model, reactor, repos, resolve, settings, verify, version};
 use std::path::PathBuf;
 use std::time::Instant;
+
+mod build;
+mod index;
+mod lock;
+mod model;
+mod pom;
+mod reactor;
+mod repos;
+mod resolve;
+mod secret;
+mod settings;
+mod testcache;
+mod verify;
+mod version;
 
 fn main() {
     if let Err(e) = run() {
@@ -412,9 +446,29 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+/// The one-line version string: package version, git commit, build time and a name derived from the commit.
+///
+/// A `-dirty` suffix on the commit means the working tree had uncommitted changes when it was built.
+pub fn version() -> String {
+    format!(
+        "rvn {} ({}, {}) \"{}\"",
+        env!("CARGO_PKG_VERSION"),
+        env!("RAYVN_COMMIT"),
+        env!("RAYVN_BUILT"),
+        env!("RAYVN_NAME")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_version_line_names_the_binary_and_the_package_version() {
+        let v = version();
+        assert!(v.starts_with("rvn "));
+        assert!(v.contains(env!("CARGO_PKG_VERSION")));
+    }
 
     fn parse(args: &[&str]) -> Result<Option<Args>> {
         Args::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
@@ -513,7 +567,7 @@ mod tests {
     #[test]
     fn unrun_plugins_produce_one_warning_each_naming_the_module() {
         let mut e = model::Effective {
-            gav: rayvn::pom::Gav::new("g", "mod", "1"),
+            gav: pom::Gav::new("g", "mod", "1"),
             packaging: "jar".into(),
             props: Default::default(),
             managed: Default::default(),

@@ -66,4 +66,4 @@ chmod +x .githooks/pre-commit scripts/check.sh
 
 - `proposals/`: design decisions, numbered, not rewritten after the fact.
 - `docs/`: user documentation (`routing.md`, `credentials.md`, `testing.md`, `workspace.md`, `version-ranges.md`, `plugins.md`).
-- API docs: `cargo doc --no-deps --open`. Examples in them run under `cargo test`.
+- Code: one crate, `rayvn`, which builds the single binary `rvn`. It is not a library; the module map is at the top of `src/main.rs`, and unit tests sit beside the code (`cargo test`).

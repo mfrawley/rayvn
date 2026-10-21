@@ -80,12 +80,6 @@ fn expand(s: &str) -> String {
 }
 
 /// Expands `${env.X}` / `${user.home}`; errors on anything unresolved. For credentials only.
-///
-/// ```
-/// use rayvn::settings::expand_strict;
-/// assert_eq!(expand_strict("plain").unwrap(), "plain");
-/// assert!(expand_strict("${env.RAYVN_DOCTEST_SURELY_UNSET}").is_err());
-/// ```
 pub fn expand_strict(s: &str) -> Result<String> {
     expand_with(s, true)
 }
@@ -420,6 +414,12 @@ pub fn load_config(project_dir: &Path) -> Result<(Config, Vec<PathBuf>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_expansion_rejects_unset_variables() {
+        assert_eq!(expand_strict("plain").unwrap(), "plain");
+        assert!(expand_strict("${env.RAYVN_TEST_SURELY_UNSET}").is_err());
+    }
 
     #[test]
     fn test_settings_later_file_wins_and_inputs_add_up() {

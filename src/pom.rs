@@ -6,11 +6,6 @@ use roxmltree::{Document, Node, ParsingOptions};
 use std::collections::BTreeMap;
 
 /// Maven coordinates: group, artifact and version.
-///
-/// ```
-/// use rayvn::pom::Gav;
-/// assert_eq!(Gav::new("org.example", "lib", "1.0").to_string(), "org.example:lib:1.0");
-/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Gav {
     pub group: String,
@@ -639,19 +634,6 @@ fn jdk_matches(spec: &str) -> bool {
 }
 
 /// Parses one POM, applying the profiles that are active without Maven's command-line context.
-///
-/// ```
-/// let pom = rayvn::pom::parse(r#"
-///   <project>
-///     <groupId>org.example</groupId><artifactId>app</artifactId><version>1.0</version>
-///     <dependencies>
-///       <dependency><groupId>org.example</groupId><artifactId>lib</artifactId><version>2.0</version></dependency>
-///     </dependencies>
-///   </project>"#).unwrap();
-/// assert_eq!(pom.artifact, "app");
-/// assert_eq!(pom.deps.len(), 1);
-/// assert_eq!(pom.deps[0].version.as_deref(), Some("2.0"));
-/// ```
 pub fn parse(xml: &str) -> Result<RawPom> {
     let mut pom = parse_raw(xml)?;
     let doc_profiles = std::mem::take(&mut pom.profiles);
@@ -741,6 +723,30 @@ fn parse_raw(xml: &str) -> Result<RawPom> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gav_displays_as_colon_separated_coordinates() {
+        assert_eq!(
+            Gav::new("org.example", "lib", "1.0").to_string(),
+            "org.example:lib:1.0"
+        );
+    }
+
+    #[test]
+    fn parse_reads_coordinates_and_dependencies() {
+        let pom = parse(
+            r#"<project>
+                 <groupId>org.example</groupId><artifactId>app</artifactId><version>1.0</version>
+                 <dependencies>
+                   <dependency><groupId>org.example</groupId><artifactId>lib</artifactId><version>2.0</version></dependency>
+                 </dependencies>
+               </project>"#,
+        )
+        .unwrap();
+        assert_eq!(pom.artifact, "app");
+        assert_eq!(pom.deps.len(), 1);
+        assert_eq!(pom.deps[0].version.as_deref(), Some("2.0"));
+    }
 
     #[test]
     fn artifact_types_map_to_extension_and_classifier() {
