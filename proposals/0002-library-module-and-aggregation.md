@@ -2,7 +2,7 @@
 
 Status: proposed, 2026-10-21
 
-Purpose of the project: see `README.md` (Maven-compatible, modernised). Every item below says how Maven, Gradle and Bazel handle it, and what raven takes.
+Purpose of the project: see `README.md` (Maven-compatible, modernised). Every item below says how Maven, Gradle and Bazel handle it, and what rayvn takes.
 
 ## Why these two, in this order
 
@@ -15,11 +15,11 @@ Not verified yet: that `rvn build` currently fails on the library module and how
 
 ## Part 1: the library module
 
-What its POM uses, and the gap in raven today:
+What its POM uses, and the gap in rayvn today:
 
-| Maven feature | In the library module | raven today |
+| Maven feature | In the library module | rayvn today |
 |---|---|---|
-| Compile main | `source/target 25`, `encoding`, `fork`, `maxmem`, `Xmaxwarns/Xmaxerrs` | `javac` with `--release`; fork/memory are irrelevant (raven calls `javac` directly); `-proc:none` is hardcoded (check whether any dependency needs an annotation processor) |
+| Compile main | `source/target 25`, `encoding`, `fork`, `maxmem`, `Xmaxwarns/Xmaxerrs` | `javac` with `--release`; fork/memory are irrelevant (rayvn calls `javac` directly); `-proc:none` is hardcoded (check whether any dependency needs an annotation processor) |
 | Compile and run tests | surefire: `includes **/Test*.java, *Test.java, *Tests.java, *TestCase.java`; `excludes *IT.java, *ITCase.java`; `useModulePath=false`; 35 test files | none (STATUS row 9) |
 | Integration tests | failsafe: `*IT.java`, `*ITCase.java`; `skipITs` property (default `false` in the root POM); goals `integration-test` + `verify` | none |
 | Dependency convergence | enforcer `<dependencyConvergence/>` | nothing; fails no build |
@@ -35,14 +35,14 @@ What its POM uses, and the gap in raven today:
 
 ### Decision: no plugin execution
 
-raven does not run Maven plugins (no JVM plugin host, no Mojo API). It reads a plugin's configuration from the POM and implements the behaviour natively for a short list of well-known plugins (compiler, shade, surefire, failsafe, enforcer's convergence rule, jar). Anything else is reported as ignored, as shade options already are. This keeps raven fast and single-binary, and is the main compatibility trade-off.
+rayvn does not run Maven plugins (no JVM plugin host, no Mojo API). It reads a plugin's configuration from the POM and implements the behaviour natively for a short list of well-known plugins (compiler, shade, surefire, failsafe, enforcer's convergence rule, jar). Anything else is reported as ignored, as shade options already are. This keeps rayvn fast and single-binary, and is the main compatibility trade-off.
 
 ### How Gradle and Bazel handle it (from memory, unchecked)
 
-- **Tests.** Gradle's `test` task is built in: it discovers test classes by scanning compiled output and runs them in a forked worker JVM (or several, `maxParallelForks`), with results cached by input hash. Bazel has `java_test` per target; each runs in a sandbox, in parallel, with the result cached by the hash of its inputs, so an unchanged test is never re-run. raven takes: run tests in a separate JVM and skip when nothing changed (later, via the same input hash `raven.lock` already gives us). It declines Bazel's per-target granularity, which Maven projects don't have.
-- **Integration tests.** Gradle uses a separate source set and task (the `jvm-test-suite` plugin); Bazel uses a separate target tagged `integration`. Both treat it as a distinct build unit, not a naming convention. raven follows Maven's `*IT` naming because that is what the POM says, but runs them as a separate step, like both.
-- **Plugins.** Gradle plugins are code, in-process, with a typed task API; Bazel rules are Starlark, run by the build engine, and actions must declare their inputs and outputs. Maven plugins are arbitrary JVM code with side effects. raven's native implementations are closest to Bazel's idea (a fixed, known action with declared inputs), and that is why executing unknown plugins is out of scope.
-- **Convergence.** Gradle resolves one version per module by default (highest wins) and offers `failOnVersionConflict()`; Bazel's `rules_jvm_external` pins one version per artifact in a lock file (`maven_install.json`). raven already has the lockfile; the check just reports where the graph needed mediation.
+- **Tests.** Gradle's `test` task is built in: it discovers test classes by scanning compiled output and runs them in a forked worker JVM (or several, `maxParallelForks`), with results cached by input hash. Bazel has `java_test` per target; each runs in a sandbox, in parallel, with the result cached by the hash of its inputs, so an unchanged test is never re-run. rayvn takes: run tests in a separate JVM and skip when nothing changed (later, via the same input hash `rayvn.lock` already gives us). It declines Bazel's per-target granularity, which Maven projects don't have.
+- **Integration tests.** Gradle uses a separate source set and task (the `jvm-test-suite` plugin); Bazel uses a separate target tagged `integration`. Both treat it as a distinct build unit, not a naming convention. rayvn follows Maven's `*IT` naming because that is what the POM says, but runs them as a separate step, like both.
+- **Plugins.** Gradle plugins are code, in-process, with a typed task API; Bazel rules are Starlark, run by the build engine, and actions must declare their inputs and outputs. Maven plugins are arbitrary JVM code with side effects. rayvn's native implementations are closest to Bazel's idea (a fixed, known action with declared inputs), and that is why executing unknown plugins is out of scope.
+- **Convergence.** Gradle resolves one version per module by default (highest wins) and offers `failOnVersionConflict()`; Bazel's `rules_jvm_external` pins one version per artifact in a lock file (`maven_install.json`). rayvn already has the lockfile; the check just reports where the graph needed mediation.
 
 ## Part 2: `<modules>` aggregation
 
@@ -53,13 +53,13 @@ raven does not run Maven plugins (no JVM plugin host, no Mojo API). It reads a p
 3. Resolve a sibling at the reactor version (`lib:1.0-SNAPSHOT`) from its build output, not from a repository.
 4. Build independent modules in parallel.
 
-One `raven.lock` per module, as now; no root lockfile until we need one.
+One `rayvn.lock` per module, as now; no root lockfile until we need one.
 
 ### How Gradle and Bazel handle it (from memory, unchecked)
 
 - **Gradle** lists projects in `settings.gradle` and builds a task graph over all of them: `:core:jar` before `:app:compileJava`. Independent tasks run in parallel; up-to-date tasks are skipped. A sibling is a `project(":core")` dependency.
 - **Bazel** has no module list: every directory with a `BUILD` file is a package, targets name their dependencies by label (`//core:lib`), and the graph is the whole build. Sibling and external dependencies use the same mechanism.
-- **Maven's reactor** sorts modules into a linear order and builds sequentially (`-T` adds module-level parallelism). raven takes Gradle's idea: build a graph, run what is independent in parallel. It keeps Maven's input (`<modules>` in the POM).
+- **Maven's reactor** sorts modules into a linear order and builds sequentially (`-T` adds module-level parallelism). rayvn takes Gradle's idea: build a graph, run what is independent in parallel. It keeps Maven's input (`<modules>` in the POM).
 
 ## Deferred
 

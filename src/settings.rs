@@ -1,3 +1,6 @@
+//! Configuration inputs: Maven's `~/.m2/settings.xml` (mirrors, servers, proxies, local repository) and
+//! rayvn's own `~/.rayvn/config.toml` and `rayvn.toml` (repositories, routes, hints, cache options).
+
 use crate::pom::{RepoDecl, child, text};
 use anyhow::{Context, Result, bail};
 use roxmltree::Document;
@@ -9,10 +12,10 @@ pub fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").expect("HOME not set"))
 }
 
-/// `$XDG_CACHE_HOME/raven/repository`, else `~/.cache/raven/repository` (also on macOS, like uv and cargo).
+/// `$XDG_CACHE_HOME/rayvn/repository`, else `~/.cache/rayvn/repository` (also on macOS, like uv and cargo).
 pub fn default_cache_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home().join(".cache"));
-    base.join("raven/repository")
+    base.join("rayvn/repository")
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +77,12 @@ fn expand(s: &str) -> String {
 }
 
 /// Expands `${env.X}` / `${user.home}`; errors on anything unresolved. For credentials only.
+///
+/// ```
+/// use rayvn::settings::expand_strict;
+/// assert_eq!(expand_strict("plain").unwrap(), "plain");
+/// assert!(expand_strict("${env.RAYVN_DOCTEST_SURELY_UNSET}").is_err());
+/// ```
 pub fn expand_strict(s: &str) -> Result<String> {
     expand_with(s, true)
 }
@@ -81,7 +90,7 @@ pub fn expand_strict(s: &str) -> Result<String> {
 pub fn load() -> Result<(Settings, Vec<PathBuf>)> {
     let path = home().join(".m2/settings.xml");
     if !path.is_file() {
-        let local_repo = std::env::var("RAVEN_LOCAL_REPO").ok().map(PathBuf::from);
+        let local_repo = std::env::var("RAYVN_LOCAL_REPO").ok().map(PathBuf::from);
         return Ok((Settings { local_repo, ..Default::default() }, vec![]));
     }
     let xml = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -89,7 +98,7 @@ pub fn load() -> Result<(Settings, Vec<PathBuf>)> {
     let root = doc.root_element();
     let mut s = Settings::default();
 
-    s.local_repo = std::env::var("RAVEN_LOCAL_REPO")
+    s.local_repo = std::env::var("RAYVN_LOCAL_REPO")
         .ok()
         .map(PathBuf::from)
         .or_else(|| text(root, "localRepository").map(|p| PathBuf::from(expand(&p))));
@@ -176,7 +185,7 @@ impl Mirror {
     }
 }
 
-/// Optional raven-specific config (`~/.raven/config.toml`, then `./raven.toml`).
+/// Optional rayvn-specific config (`~/.rayvn/config.toml`, then `./rayvn.toml`).
 /// Routes restrict which remote repositories are asked for which groupIds.
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -199,10 +208,10 @@ pub struct Config {
     /// How long a 404 is remembered, in hours (default 24; 0 turns the miss cache off).
     #[serde(default)]
     pub miss_ttl_hours: Option<u64>,
-    /// How often a SNAPSHOT that raven downloaded is revalidated, in hours (default 24; 0 = every run).
+    /// How often a SNAPSHOT that rayvn downloaded is revalidated, in hours (default 24; 0 = every run).
     #[serde(default)]
     pub snapshot_ttl_hours: Option<u64>,
-    /// Extra cache directories that are read but never written (also `RAVEN_RO_REPO`, `:`-separated).
+    /// Extra cache directories that are read but never written (also `RAYVN_RO_REPO`, `:`-separated).
     #[serde(default)]
     pub read_only_repos: Vec<String>,
 }
@@ -284,9 +293,9 @@ pub fn load_config(project_dir: &Path) -> Result<(Config, Vec<PathBuf>)> {
     let mut cfg = Config::default();
     let mut inputs = vec![];
     // Project routes take precedence, so they come first.
-    let user_cfg = home().join(".raven/config.toml");
+    let user_cfg = home().join(".rayvn/config.toml");
     // User config first: its credentials win over a project file's CI-oriented env refs.
-    for p in [user_cfg.clone(), project_dir.join("raven.toml")] {
+    for p in [user_cfg.clone(), project_dir.join("rayvn.toml")] {
         if p.is_file() {
             let c: Config = toml::from_str(&std::fs::read_to_string(&p)?).with_context(|| format!("parsing {}", p.display()))?;
             // A project file can come from an untrusted checkout, so it must not run commands.

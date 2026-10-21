@@ -1,7 +1,16 @@
+//! Reading a single `pom.xml` as written: coordinates, properties, dependencies, profiles and the plugin
+//! settings rayvn understands. Inheritance and `${...}` interpolation happen later, in [`crate::model`].
+
 use anyhow::{Context, Result};
 use roxmltree::{Document, Node, ParsingOptions};
 use std::collections::BTreeMap;
 
+/// Maven coordinates: group, artifact and version.
+///
+/// ```
+/// use rayvn::pom::Gav;
+/// assert_eq!(Gav::new("org.example", "lib", "1.0").to_string(), "org.example:lib:1.0");
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Gav {
     pub group: String,
@@ -61,7 +70,7 @@ pub struct RawPom {
     pub shade: Option<ShadeCfg>,
 }
 
-/// What raven understands of `maven-shade-plugin`: fat jar, services merge, signature excludes, manifest.
+/// What rayvn understands of `maven-shade-plugin`: fat jar, services merge, signature excludes, manifest.
 #[derive(Clone, Debug, Default)]
 pub struct ShadeCfg {
     pub services: bool,
@@ -69,7 +78,7 @@ pub struct ShadeCfg {
     pub manifest: Vec<(String, String)>,
     /// (artifact pattern like `*:*` or `group:artifact`, ant-style exclude globs)
     pub excludes: Vec<(String, Vec<String>)>,
-    /// Config raven does not implement; reported so a fat jar is never silently different.
+    /// Config rayvn does not implement; reported so a fat jar is never silently different.
     pub ignored: Vec<String>,
 }
 
@@ -110,7 +119,7 @@ fn parse_shade(root: Node) -> Option<ShadeCfg> {
     Some(cfg)
 }
 
-/// `<profile>` activation conditions that raven can evaluate without Maven's CLI context.
+/// `<profile>` activation conditions that rayvn can evaluate without Maven's CLI context.
 #[derive(Clone, Debug, Default)]
 struct Activation {
     by_default: bool,
@@ -204,7 +213,7 @@ fn parse_profile(n: Node) -> Profile {
 }
 
 /// Activate profiles the way Maven does: any profile whose explicit condition holds; if none do,
-/// the `activeByDefault` ones. Conditions raven cannot evaluate (`file`, `-P`, `-D`) count as inactive.
+/// the `activeByDefault` ones. Conditions rayvn cannot evaluate (`file`, `-P`, `-D`) count as inactive.
 fn active(profiles: &[Profile]) -> Vec<&Profile> {
     let explicit: Vec<&Profile> = profiles.iter().filter(|p| p.activation.as_ref().is_some_and(explicit_match)).collect();
     if !explicit.is_empty() {
@@ -222,7 +231,7 @@ fn explicit_match(a: &Activation) -> bool {
 }
 
 fn property_matches((name, _): &(String, Option<String>)) -> bool {
-    // raven has no -D yet, so no property is ever set: only a negated name can hold.
+    // rayvn has no -D yet, so no property is ever set: only a negated name can hold.
     name.starts_with('!')
 }
 
@@ -285,6 +294,20 @@ fn jdk_matches(spec: &str) -> bool {
     norm(spec) == Some(cur)
 }
 
+/// Parses one POM, applying the profiles that are active without Maven's command-line context.
+///
+/// ```
+/// let pom = rayvn::pom::parse(r#"
+///   <project>
+///     <groupId>org.example</groupId><artifactId>app</artifactId><version>1.0</version>
+///     <dependencies>
+///       <dependency><groupId>org.example</groupId><artifactId>lib</artifactId><version>2.0</version></dependency>
+///     </dependencies>
+///   </project>"#).unwrap();
+/// assert_eq!(pom.artifact, "app");
+/// assert_eq!(pom.deps.len(), 1);
+/// assert_eq!(pom.deps[0].version.as_deref(), Some("2.0"));
+/// ```
 pub fn parse(xml: &str) -> Result<RawPom> {
     let mut pom = parse_raw(xml)?;
     let doc_profiles = std::mem::take(&mut pom.profiles);

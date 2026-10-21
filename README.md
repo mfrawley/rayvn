@@ -1,4 +1,4 @@
-# raven (`rvn`)
+# rayvn (`rvn`)
 
 A fast, Maven-compatible build tool in Rust.
 
@@ -6,9 +6,47 @@ A fast, Maven-compatible build tool in Rust.
 
 Backwards-compatible with `mvn`, dragged into modernity. Existing projects build from their existing `pom.xml` (and `settings.xml`) with no migration; the tool underneath works the way current tools (uv, Cargo, Gradle, Bazel) do: a lockfile, a fast parallel resolver, a cache that is safe in CI, and no work done twice.
 
-Compatibility is judged by results (same classpath, same jar contents), not by reproducing Maven's internals. Where Maven's model is the obstacle (a mutable shared `~/.m2`, plugins as arbitrary code, a sequential reactor), raven keeps the POM as the input and changes what happens behind it. Each design note records the choice, and compares how Gradle and Bazel handle the same problem.
+Compatibility is judged by results (same classpath, same jar contents), not by reproducing Maven's internals. Where Maven's model is the obstacle (a mutable shared `~/.m2`, plugins as arbitrary code, a sequential reactor), rayvn keeps the POM as the input and changes what happens behind it. Each design note records the choice, and compares how Gradle and Bazel handle the same problem.
+
+## Usage
+
+```text
+rvn <command> [-f pom.xml] [--locked] [--refresh] [--cold]
+```
+
+| Command | What it does |
+|---|---|
+| `lock` | Resolve the dependencies and write `rayvn.lock` next to the POM. |
+| `fetch` | Download exactly what `rayvn.lock` lists and verify checksums. Never reads POMs. For CI. |
+| `resolve` | Print the dependency tree, one line per artifact, indented by depth. |
+| `classpath` | Print the classpath as colon-separated jar paths. `--test` includes test scope. |
+| `build` | Compile and package the jar into `target/`; shaded if the POM configures `maven-shade-plugin`. Prints the jar path on stdout. |
+
+| Flag | Meaning |
+|---|---|
+| `-f <path>` | Use this POM instead of `./pom.xml`. The lockfile goes beside it. |
+| `--locked` | Fail if `rayvn.lock` is missing or stale, instead of resolving. |
+| `--refresh` | Ignore `rayvn.lock` and the miss cache for this run; the lock is rewritten. |
+| `--cold` | Use a throwaway cache, deleted afterwards. Implies `--refresh`. Not allowed with `classpath`. |
+
+Progress and summaries go to stderr and results to stdout, so output pipes cleanly.
+
+```sh
+rvn lock                          # resolve and write rayvn.lock
+rvn build                         # compile and package target/<artifact>-<version>.jar
+rvn build -f services/api/pom.xml # a POM elsewhere
+rvn fetch                         # CI: restore exactly the locked set
+rvn build --locked                # CI: fail rather than re-resolve
+rvn resolve | grep guava          # which version of guava did we get?
+java -cp "$(rvn classpath):target/classes" app.Main
+rvn lock --cold                   # time a resolve from an empty cache
+rvn --version                     # commit, build time and name of this binary
+```
+
+Environment: `RAYVN_LOCAL_REPO` (cache location), `RAYVN_RO_REPO` (read-only cache layers), `RAYVN_DEBUG_HTTP=1` (print each request and status), `RAYVN_NO_BANNER=1` (hide the banner). Routing and credentials: `docs/routing.md`, `docs/credentials.md`.
 
 ## Where things are
 
 - `proposals/`: design decisions, numbered, not rewritten after the fact.
 - `docs/`: user documentation (`routing.md`, `credentials.md`).
+- API docs: `cargo doc --no-deps --open`. Examples in them run under `cargo test`.

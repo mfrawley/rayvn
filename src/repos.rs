@@ -1,3 +1,6 @@
+//! Where artifacts come from: the ordered list of remote repositories (with routes, hints, mirrors, proxies
+//! and credentials), the local cache, the miss cache, SNAPSHOT revalidation and parallel downloads.
+
 use crate::index::{Index, SnapshotStamp, Validators};
 use crate::pom::RepoDecl;
 use crate::secret::Secret;
@@ -110,7 +113,7 @@ impl Repos {
         let miss_ttl = config.miss_ttl_hours.unwrap_or(24) * 3600;
         let index = Index::load(&local, now_secs(), miss_ttl, !refresh && miss_ttl > 0);
         let mut read_only: Vec<PathBuf> = config.read_only_repos.iter().map(PathBuf::from).collect();
-        if let Some(v) = std::env::var_os("RAVEN_RO_REPO") {
+        if let Some(v) = std::env::var_os("RAYVN_RO_REPO") {
             read_only.extend(std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()));
         }
         read_only.retain(|p| *p != local && !cold);
@@ -119,7 +122,7 @@ impl Repos {
             .timeout(Duration::from_secs(120))
             .connect_timeout(Duration::from_secs(10))
             .pool_max_idle_per_host(32)
-            .user_agent(concat!("raven/", env!("CARGO_PKG_VERSION")));
+            .user_agent(concat!("rayvn/", env!("CARGO_PKG_VERSION")));
         if let Some(p) = settings.proxies.first() {
             builder = builder.proxy(build_proxy(p)?);
         }
@@ -212,13 +215,13 @@ impl Repos {
         format!("{}/{artifact}/{version}/{artifact}-{version}{c}.{ext}", group.replace('.', "/"))
     }
 
-    /// Remembers which repository supplied `rel`, so later runs on a warm cache can still write it to `raven.lock`.
+    /// Remembers which repository supplied `rel`, so later runs on a warm cache can still write it to `rayvn.lock`.
     fn downloaded_from(&self, r: &Remote, rel: &str, path: PathBuf) -> Located {
         self.index.set_origin(rel, &r.id);
         Located { path, downloaded: true, repo: Some(r.id.clone()) }
     }
 
-    /// Repository a cached file came from: where raven downloaded it, or for a SNAPSHOT the repo it was last checked against.
+    /// Repository a cached file came from: where rayvn downloaded it, or for a SNAPSHOT the repo it was last checked against.
     fn origin(&self, rel: &str) -> Option<String> {
         self.index.origin(rel).or_else(|| self.index.snapshot(rel).map(|s| s.repo))
     }
@@ -322,8 +325,8 @@ impl Repos {
         }
     }
 
-    /// A SNAPSHOT that raven downloaded earlier is rechecked once its stamp is older than `snapshot_ttl_hours`
-    /// (always with `--refresh`). Files raven didn't download, such as `mvn install` output, are left alone.
+    /// A SNAPSHOT that rayvn downloaded earlier is rechecked once its stamp is older than `snapshot_ttl_hours`
+    /// (always with `--refresh`). Files rayvn didn't download, such as `mvn install` output, are left alone.
     fn revalidate_snapshot(&self, group: &str, artifact: &str, version: &str, classifier: Option<&str>, ext: &str, local: &Path) -> Result<Option<Located>> {
         let Some(stamp) = self.index.snapshot(&self.rel_of(local)) else { return Ok(None) };
         if !self.refresh && now_secs().saturating_sub(stamp.checked) < self.snapshot_ttl {
@@ -453,7 +456,7 @@ impl Repos {
                 return Ok(Fetched::Missing);
             }
         };
-        if std::env::var_os("RAVEN_DEBUG_HTTP").is_some() {
+        if std::env::var_os("RAYVN_DEBUG_HTTP").is_some() {
             eprintln!("  http {} {url}", resp.status().as_u16());
         }
         match classify(resp.status().as_u16(), held.is_some(), cred.is_some()) {
@@ -461,7 +464,7 @@ impl Repos {
             Outcome::NotModified => return Ok(Fetched::NotModified),
             Outcome::Missing => return Ok(Fetched::Missing),
             Outcome::BadCredentials(code) => {
-                bail!("{url}: HTTP {code}; check credentials for repository '{}' (settings.xml <server> or raven.toml [[repo]])", r.id)
+                bail!("{url}: HTTP {code}; check credentials for repository '{}' (settings.xml <server> or rayvn.toml [[repo]])", r.id)
             }
             Outcome::RepoError(code) => {
                 self.mark_dead(r, &format!("HTTP {code}"));
@@ -480,7 +483,7 @@ impl Repos {
     /// The `Authorization` header for `r`; refuses plain http unless the repository is listed in `allow_http_auth`.
     fn authorization(&self, r: &Remote, url: &str, cred: &Cred) -> Result<reqwest::header::HeaderValue> {
         if url.starts_with("http://") && !self.allow_http_auth.contains(&r.id) {
-            bail!("refusing to send credentials for repository '{}' over plain http ({}); use https or add the id to allow_http_auth in raven.toml", r.id, r.url);
+            bail!("refusing to send credentials for repository '{}' over plain http ({}); use https or add the id to allow_http_auth in rayvn.toml", r.id, r.url);
         }
         let mut v = reqwest::header::HeaderValue::from_str(cred.get(&r.id)?.expose()).context("credential is not a valid header value")?;
         v.set_sensitive(true);
@@ -530,7 +533,7 @@ fn response_validators(headers: &reqwest::header::HeaderMap) -> Validators {
 /// Streams `body` to a temporary file beside `dest`, checks `expect_sha` if given, then renames into place. Returns the size.
 fn save_body(mut body: impl std::io::Read, dest: &Path, expect_sha: Option<&str>, url: &str) -> Result<u64> {
     std::fs::create_dir_all(dest.parent().context("destination has no parent directory")?)?;
-    let tmp = dest.with_extension(format!("raven-tmp-{}", TMP_COUNTER.fetch_add(1, Ordering::Relaxed)));
+    let tmp = dest.with_extension(format!("rayvn-tmp-{}", TMP_COUNTER.fetch_add(1, Ordering::Relaxed)));
     let mut f = std::fs::File::create(&tmp)?;
     std::io::copy(&mut body, &mut f).with_context(|| format!("downloading {url}"))?;
     f.flush()?;
@@ -619,7 +622,7 @@ fn apply_mirror(mirrors: &[crate::settings::Mirror], r: RepoDecl) -> (String, St
     (id, url.trim_end_matches('/').to_string())
 }
 
-/// raven.toml wins over settings.xml `<server>`.
+/// rayvn.toml wins over settings.xml `<server>`.
 fn credentials_for(id: &str, config_repos: &[crate::settings::RepoCfg], servers: &HashMap<String, (String, String)>) -> Result<Option<Cred>> {
     for c in config_repos.iter().filter(|c| c.id == id) {
         if let Some(h) = config_auth(c)? {
@@ -930,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn files_raven_did_not_download_have_no_known_origin() {
+    fn files_rayvn_did_not_download_have_no_known_origin() {
         let cache = fresh_cache("origin-unknown");
         let jar = cache.join("g/lib/1.0/lib-1.0.jar");
         std::fs::create_dir_all(jar.parent().unwrap()).unwrap();

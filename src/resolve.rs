@@ -1,3 +1,6 @@
+//! Dependency resolution: breadth-first over the graph, Maven's "nearest wins" version mediation, scope
+//! mediation, exclusions and optional dependencies. POMs at each depth are loaded in parallel.
+
 use crate::model::{Effective, Loader};
 use crate::pom::{Dep, Gav};
 use crate::repos::{Located, Repos};

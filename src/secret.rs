@@ -1,4 +1,13 @@
+//! Credentials that cannot leak through logging.
+
 /// A credential that never prints; use `expose` at the single point of use.
+///
+/// ```
+/// use rayvn::secret::Secret;
+/// let s = Secret::new("hunter2");
+/// assert_eq!(format!("{s} {s:?}"), "*** Secret(***)");
+/// assert_eq!(s.expose(), "hunter2");
+/// ```
 #[derive(Clone)]
 pub struct Secret(String);
 
@@ -7,6 +16,7 @@ impl Secret {
         Secret(s.into())
     }
 
+    /// The plain value. Call it only where the credential is sent, never to build a log line.
     pub fn expose(&self) -> &str {
         &self.0
     }

@@ -1,3 +1,6 @@
+//! The effective model of a project: a POM with its parent chain, BOM imports, properties and
+//! dependency management folded in. [`Loader`] fetches parents and imports through [`crate::repos`].
+
 use crate::pom::{self, Dep, Gav, ParentRef, RawPom, RepoDecl};
 use crate::repos::Repos;
 use anyhow::{Context, Result, bail};
@@ -166,6 +169,17 @@ fn merge_dependencies(own: Vec<Dep>, parent: Option<&Effective>, managed: &HashM
     deps
 }
 
+/// Replaces `${key}` from `props`, repeatedly (properties may refer to properties); unknown keys stay as written.
+///
+/// ```
+/// use std::collections::BTreeMap;
+/// let props = BTreeMap::from([
+///     ("v".to_string(), "1.2".to_string()),
+///     ("full".to_string(), "lib-${v}".to_string()),
+/// ]);
+/// assert_eq!(rayvn::model::interpolate("${full}.jar", &props), "lib-1.2.jar");
+/// assert_eq!(rayvn::model::interpolate("${missing}", &props), "${missing}");
+/// ```
 pub fn interpolate(s: &str, props: &BTreeMap<String, String>) -> String {
     let mut cur = s.to_string();
     for _ in 0..16 {

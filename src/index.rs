@@ -1,10 +1,14 @@
-//! One append-only bookkeeping file per cache directory (`<cache>/.raven-index.tsv`).
+//! One append-only bookkeeping file per cache directory (`<cache>/.rayvn-index.tsv`).
 //!
 //! Line formats (tab separated, later lines win):
-//!   miss  <unix secs>  <repo>  <auth|anon>  <path>
-//!   snap  <local path> <repo>  <timestamped version>  <checked unix secs>
-//!   val   <metadata path>  <etag>  <last-modified>
-//!   from  <artifact path>  <repo>                       (repository an artifact was downloaded from)
+//!
+//! ```text
+//! miss  <unix secs>  <repo>  <auth|anon>  <path>
+//! snap  <local path> <repo>  <timestamped version>  <checked unix secs>
+//! val   <metadata path>  <etag>  <last-modified>
+//! from  <artifact path>  <repo>        (repository an artifact was downloaded from)
+//! ```
+//!
 //! Paths are relative to the cache directory.
 
 use std::collections::HashMap;
@@ -19,7 +23,7 @@ pub struct Validators {
     pub last_modified: Option<String>,
 }
 
-/// Which remote file a local `-SNAPSHOT` file was copied from, and when raven last checked it.
+/// Which remote file a local `-SNAPSHOT` file was copied from, and when rayvn last checked it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnapshotStamp {
     pub repo: String,
@@ -104,7 +108,7 @@ fn format_state(st: &State) -> String {
 impl Index {
     /// `use_misses = false` ignores recorded 404s (still records new ones). Rewrites the file when most of it is stale.
     pub fn load(cache: &Path, now: u64, miss_ttl: u64, use_misses: bool) -> Self {
-        let path = cache.join(".raven-index.tsv");
+        let path = cache.join(".rayvn-index.tsv");
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let state = parse(&text, now, miss_ttl, use_misses);
         let live = state.misses.len() + state.snaps.len() + state.vals.len() + state.origins.len();
@@ -154,7 +158,7 @@ impl Index {
         self.state.lock().unwrap().snaps.insert(path.to_string(), s);
     }
 
-    /// The repository `path` was downloaded from, if raven did the download.
+    /// The repository `path` was downloaded from, if rayvn did the download.
     pub fn origin(&self, path: &str) -> Option<String> {
         self.state.lock().unwrap().origins.get(path).cloned()
     }
@@ -221,7 +225,7 @@ mod tests {
     fn index_persists_between_loads() {
         let dir = std::env::temp_dir().join(format!("rvn-index-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let _ = std::fs::remove_file(dir.join(".raven-index.tsv"));
+        let _ = std::fs::remove_file(dir.join(".rayvn-index.tsv"));
         let i = Index::load(&dir, 100, 50, true);
         i.add_miss("r\tanon\tp", 100);
         i.set_snapshot("s.jar", stamp());
@@ -231,7 +235,7 @@ mod tests {
         let j = Index::load(&dir, 120, 50, true);
         assert!(j.has_miss("r\tanon\tp"));
         assert_eq!(j.origin("a/x-1.jar").as_deref(), Some("r"));
-        assert_eq!(std::fs::read_to_string(dir.join(".raven-index.tsv")).unwrap().matches("from\t").count(), 1, "unchanged origin is not re-appended");
+        assert_eq!(std::fs::read_to_string(dir.join(".rayvn-index.tsv")).unwrap().matches("from\t").count(), 1, "unchanged origin is not re-appended");
         assert_eq!(j.snapshot("s.jar"), Some(stamp()));
         assert_eq!(j.validators("m.xml").unwrap().last_modified.as_deref(), Some("lm"));
         assert!(!Index::load(&dir, 200, 50, true).has_miss("r\tanon\tp"));

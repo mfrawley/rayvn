@@ -1,14 +1,8 @@
-mod build;
-mod index;
-mod lock;
-mod model;
-mod pom;
-mod repos;
-mod resolve;
-mod secret;
-mod settings;
+//! The `rvn` command line. All logic lives in the [`rayvn`] library; this file parses arguments and sequences
+//! the steps.
 
 use anyhow::{Context, Result, bail};
+use rayvn::{build, lock, model, repos, resolve, settings, version};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -24,8 +18,9 @@ const BANNER: &str = include_str!("../data/banner.txt");
 /// Printed to stdout, but only when stdout is a terminal, so piped output (`rvn classpath | ...`) stays clean.
 fn print_banner() {
     use std::io::IsTerminal;
-    if std::io::stdout().is_terminal() && std::env::var_os("RAVEN_NO_BANNER").is_none() {
+    if std::io::stdout().is_terminal() && std::env::var_os("RAYVN_NO_BANNER").is_none() {
         println!("{BANNER}");
+        println!("  {}\n", version());
     }
 }
 
@@ -68,7 +63,7 @@ fn cold_cache_dir() -> PathBuf {
     std::env::temp_dir().join(format!("rvn-cold-{}-{nanos}", std::process::id()))
 }
 
-/// The dependency set for `args`: from a fresh `raven.lock` when there is one, else resolved from the POM
+/// The dependency set for `args`: from a fresh `rayvn.lock` when there is one, else resolved from the POM
 /// (and the lock rewritten). The second value is the root project when it had to be loaded.
 fn dependencies(
     args: &Args,
@@ -80,17 +75,17 @@ fn dependencies(
     let fetch = args.cmd == "fetch";
     let fresh = if args.cmd == "lock" || (args.refresh && !fetch) { None } else { lock::read_fresh(lock_path, pom_hash) };
     if let Some(l) = fresh {
-        eprintln!("  using raven.lock ({} packages)", l.package.len());
+        eprintln!("  using rayvn.lock ({} packages)", l.package.len());
         let resolved = lock::realize(&l, repos)?;
         if fetch {
             let (ok, skipped) = lock::verify(&l, &resolved)?;
-            eprintln!("  verified {ok} files against raven.lock ({skipped} not checkable: no checksum recorded, or SNAPSHOT)");
+            eprintln!("  verified {ok} files against rayvn.lock ({skipped} not checkable: no checksum recorded, or SNAPSHOT)");
         }
         return Ok((resolved, None));
     }
     eprintln!("  resolving dependencies");
     if fetch || args.locked {
-        bail!("raven.lock is missing or out of date; run `rvn lock`");
+        bail!("rayvn.lock is missing or out of date; run `rvn lock`");
     }
     let root = loader.from_file(&args.pom_path)?;
     let resolved = resolve::resolve(&root, loader, repos, true)?;
@@ -122,8 +117,13 @@ fn run() -> Result<()> {
     // Downloads block on the network, so allow far more in flight than there are cores.
     rayon::ThreadPoolBuilder::new().num_threads(32).build_global().ok();
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().is_some_and(|a| matches!(a.as_str(), "--version" | "-V" | "version")) {
+        println!("{}", version());
+        return Ok(());
+    }
     let Some(args) = Args::parse(&raw)? else {
         println!("{BANNER}");
+        println!("{}", version());
         println!("{USAGE}");
         return Ok(());
     };
@@ -144,7 +144,7 @@ fn run() -> Result<()> {
     let loader = model::Loader::new(&repos);
     eprintln!("rvn {}: {} ({} repositories, {} routes)", args.cmd, args.pom_path.display(), repos.remote_count(), repos.route_count());
 
-    let (resolved, root) = dependencies(&args, &pom_hash, &project_dir.join("raven.lock"), &repos, &loader)?;
+    let (resolved, root) = dependencies(&args, &pom_hash, &project_dir.join("rayvn.lock"), &repos, &loader)?;
     let direct = resolved.iter().filter(|r| r.depth == 1).count();
     eprintln!("  {} artifacts ({direct} direct): {}", resolved.len(), repos.summary());
 

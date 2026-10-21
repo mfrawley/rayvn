@@ -1,3 +1,6 @@
+//! `rvn build`: compile the main sources with `javac` against the resolved classpath, then package a jar,
+//! shaded into a single fat jar when the POM configures `maven-shade-plugin`.
+
 use crate::model::Effective;
 use crate::pom::ShadeCfg;
 use std::collections::{BTreeMap, HashSet};
@@ -113,7 +116,7 @@ fn write_jar(classes: &Path, jar_path: &Path) -> Result<()> {
     let mut zip = zip::ZipWriter::new(File::create(jar_path)?);
     let opts = deflated();
     zip.start_file(MANIFEST, opts)?;
-    zip.write_all(b"Manifest-Version: 1.0\r\nCreated-By: raven\r\n\r\n")?;
+    zip.write_all(b"Manifest-Version: 1.0\r\nCreated-By: rayvn\r\n\r\n")?;
     let mut files = vec![];
     walk(classes, &mut files)?;
     for f in files {
@@ -138,7 +141,7 @@ fn shade_in_place(root: &Effective, cfg: &ShadeCfg, target: &Path, jar_path: &Pa
     let original = target.join(format!("original-{}-{}.jar", root.gav.artifact, root.gav.version));
     std::fs::rename(jar_path, &original)?;
     for i in &cfg.ignored {
-        eprintln!("  warning: shade option not supported by raven, ignored: {i}");
+        eprintln!("  warning: shade option not supported by rayvn, ignored: {i}");
     }
     let n = shade(cfg, &original, &shaded_dependencies(resolved), jar_path)?;
     eprintln!("  shaded {} dependency jars into {} ({})", n, jar_path.display(), size(jar_path));
@@ -183,7 +186,7 @@ const MANIFEST: &str = "META-INF/MANIFEST.MF";
 const SERVICES_DIR: &str = "META-INF/services/";
 
 fn manifest(cfg: &ShadeCfg) -> String {
-    let mut mf = String::from("Manifest-Version: 1.0\r\nCreated-By: raven\r\n");
+    let mut mf = String::from("Manifest-Version: 1.0\r\nCreated-By: rayvn\r\n");
     if let Some(m) = &cfg.main_class {
         mf.push_str(&format!("Main-Class: {m}\r\n"));
     }
@@ -281,7 +284,7 @@ mod tests {
 
     #[test]
     fn manifest_lists_main_class_then_extra_attributes() {
-        assert_eq!(manifest(&cfg()), "Manifest-Version: 1.0\r\nCreated-By: raven\r\nMain-Class: a.Main\r\nX-Y: z\r\n\r\n");
+        assert_eq!(manifest(&cfg()), "Manifest-Version: 1.0\r\nCreated-By: rayvn\r\nMain-Class: a.Main\r\nX-Y: z\r\n\r\n");
     }
 
     #[test]
