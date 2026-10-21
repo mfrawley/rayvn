@@ -84,28 +84,7 @@ allow = ["org.matsim:matsim"]
 
 ### Bumping a dependency across modules (0-day response)
 
-Goal: one command that raises a library everywhere it is declared, for a person or a bot, with a result that can be reviewed and merged.
-
-```sh
-rvn bump org.apache.logging.log4j:log4j-core 2.17.1 [--dry-run] [--json] [--only-direct]
-```
-
-Design, not built:
-
-1. **Find** every place a module's version comes from, per module: a literal `<version>`, a `${property}` (change the property, once), a `<dependencyManagement>` entry (change that), an imported BOM (cannot be bumped; say so and suggest an override entry). Transitive-only use is reported, and handled by adding a managed entry only with `--pin-transitive`.
-2. **Edit in place**, touching only the version text (comments and layout kept), never rewriting the XML.
-3. **Re-lock** each changed module and every module that depends on one (the sibling graph is known), so the diff is POMs plus `rayvn.lock`.
-4. **Report**: human table by default; `--json` lists module, file, kind of edit (literal, property, managed) and old and new version. Exit codes: 0 changed, 3 nothing to change, 1 error; `--dry-run` writes nothing and uses the same codes.
-5. **Verify**: with `--test`, run the affected modules' tests (the test cache keeps this cheap).
-6. Later: `rvn audit` to list locked artifacts against an advisory feed, so the bump can be driven by it (`--from-advisory GHSA-...`), and a minimum-age option for the target version.
-
-Gradle: a version catalog or platform holds the version once; Renovate or Dependabot edit it, and `dependencyInsight` shows who pulls a library. Bazel: versions live in `maven_install` / `MODULE.bazel`, and `bazel run @maven//:pin` regenerates the lock. Maven: `versions:use-dep-version`, `versions:set-property`, `versions:update-properties` edit POMs, but do not know about lock files or which modules are affected. rayvn's edge is that the module graph and the lock are already known, so one command can do edit, re-lock and report.
-
-### How Gradle and Bazel handle it (from memory, unchecked)
-
-- **Gradle** lists projects in `settings.gradle` and builds a task graph over all of them: `:core:jar` before `:app:compileJava`. Independent tasks run in parallel; up-to-date tasks are skipped. A sibling is a `project(":core")` dependency.
-- **Bazel** has no module list: every directory with a `BUILD` file is a package, targets name their dependencies by label (`//core:lib`), and the graph is the whole build. Sibling and external dependencies use the same mechanism.
-- **Maven's reactor** sorts modules into a linear order and builds sequentially (`-T` adds module-level parallelism). rayvn takes Gradle's idea: build a graph, run what is independent in parallel. It keeps Maven's input (`<modules>` in the POM).
+Moved to its own proposal: `0003-bump.md`.
 
 ## Deferred
 
