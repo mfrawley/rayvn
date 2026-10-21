@@ -70,7 +70,8 @@ pub struct RawPom {
     pub shade: Option<ShadeCfg>,
 }
 
-/// What rayvn understands of `maven-shade-plugin`: fat jar, services merge, signature excludes, manifest.
+/// What rayvn understands of `maven-shade-plugin`: fat jar, its name and attachment, services merge,
+/// signature excludes, manifest.
 #[derive(Clone, Debug, Default)]
 pub struct ShadeCfg {
     pub services: bool,
@@ -78,6 +79,12 @@ pub struct ShadeCfg {
     pub manifest: Vec<(String, String)>,
     /// (artifact pattern like `*:*` or `group:artifact`, ant-style exclude globs)
     pub excludes: Vec<(String, Vec<String>)>,
+    /// `<finalName>`, uninterpolated: the shaded jar's file name without `.jar`.
+    pub final_name: Option<String>,
+    /// `<shadedArtifactAttached>`: keep the plain jar and write the shaded one beside it.
+    pub attached: bool,
+    /// `<shadedClassifierName>`; Maven's default is `shaded`.
+    pub classifier: Option<String>,
     /// Config rayvn does not implement; reported so a fat jar is never silently different.
     pub ignored: Vec<String>,
 }
@@ -111,7 +118,10 @@ fn parse_shade(root: Node) -> Option<ShadeCfg> {
         }
         cfg.excludes.push((art, ex));
     }
-    for k in ["relocations", "artifactSet", "minimizeJar", "shadedArtifactAttached", "finalName"] {
+    cfg.final_name = text(conf, "finalName");
+    cfg.attached = text(conf, "shadedArtifactAttached").is_some_and(|v| v == "true");
+    cfg.classifier = text(conf, "shadedClassifierName");
+    for k in ["relocations", "artifactSet", "minimizeJar"] {
         if child(conf, k).is_some() {
             cfg.ignored.push(k.to_string());
         }

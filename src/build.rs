@@ -39,11 +39,30 @@ pub fn build(root: &Effective, dir: &Path, resolved: &[Resolved]) -> Result<()> 
     let jar_path = target.join(format!("{}-{}.jar", root.gav.artifact, root.gav.version));
     write_jar(&classes, &jar_path)?;
     eprintln!("  packaged {} ({})", jar_path.display(), size(&jar_path));
+    let mut result = jar_path.clone();
     if let Some(cfg) = &root.shade {
-        shade_in_place(root, cfg, &target, &jar_path, resolved)?;
+        result = shaded_path(cfg, &target, &root.gav.artifact, &root.gav.version, &root.props);
+        if result == jar_path {
+            shade_in_place(cfg, &target, &jar_path, resolved, root)?;
+        } else {
+            shade_into(cfg, &jar_path, &result, resolved)?;
+        }
     }
-    println!("{}", jar_path.display());
+    println!("{}", result.display());
     Ok(())
+}
+
+/// Where `maven-shade-plugin` puts the shaded jar: `<finalName>.jar` when configured, else
+/// `<artifact>-<version>-<classifier>.jar` when it is attached (classifier defaults to `shaded`), else it replaces
+/// the plain jar. Checked against Maven for the first case only: shade 3.4.1 with `finalName` and an attached
+/// artifact writes `<finalName>.jar` and leaves the plain jar alone.
+fn shaded_path(cfg: &ShadeCfg, target: &Path, artifact: &str, version: &str, props: &BTreeMap<String, String>) -> PathBuf {
+    let name = match (&cfg.final_name, cfg.attached) {
+        (Some(n), _) => crate::model::interpolate(n, props),
+        (None, true) => format!("{artifact}-{version}-{}", cfg.classifier.as_deref().unwrap_or("shaded")),
+        (None, false) => format!("{artifact}-{version}"),
+    };
+    target.join(format!("{name}.jar"))
 }
 
 /// Compile-time classpath: everything except test-scoped jars, in resolution order.
@@ -137,14 +156,18 @@ fn deflated() -> SimpleFileOptions {
 }
 
 /// Replaces `jar_path` with a shaded jar; the plain jar is kept as `original-<name>`.
-fn shade_in_place(root: &Effective, cfg: &ShadeCfg, target: &Path, jar_path: &Path, resolved: &[Resolved]) -> Result<()> {
+fn shade_in_place(cfg: &ShadeCfg, target: &Path, jar_path: &Path, resolved: &[Resolved], root: &Effective) -> Result<()> {
     let original = target.join(format!("original-{}-{}.jar", root.gav.artifact, root.gav.version));
     std::fs::rename(jar_path, &original)?;
+    shade_into(cfg, &original, jar_path, resolved)
+}
+
+fn shade_into(cfg: &ShadeCfg, plain: &Path, out: &Path, resolved: &[Resolved]) -> Result<()> {
     for i in &cfg.ignored {
         eprintln!("  warning: shade option not supported by rayvn, ignored: {i}");
     }
-    let n = shade(cfg, &original, &shaded_dependencies(resolved), jar_path)?;
-    eprintln!("  shaded {} dependency jars into {} ({})", n, jar_path.display(), size(jar_path));
+    let n = shade(cfg, plain, &shaded_dependencies(resolved), out)?;
+    eprintln!("  shaded {} dependency jars into {} ({})", n, out.display(), size(out));
     Ok(())
 }
 
@@ -308,6 +331,30 @@ mod tests {
         let mut body = b"one\n".to_vec();
         merge_service_lines(&mut body, "one\n\n# c\ntwo  \n  \none\n# c\nthree\n");
         assert_eq!(String::from_utf8(body).unwrap(), "one\n# c\ntwo\n# c\nthree\n");
+    }
+
+    fn shaded(cfg: &ShadeCfg) -> PathBuf {
+        let props = BTreeMap::from([("project.version".to_string(), "1.0".to_string())]);
+        shaded_path(cfg, Path::new("t"), "app", "1.0", &props)
+    }
+
+    #[test]
+    fn shaded_jar_replaces_the_plain_jar_by_default() {
+        assert_eq!(shaded(&ShadeCfg::default()), PathBuf::from("t/app-1.0.jar"));
+    }
+
+    #[test]
+    fn attached_shaded_jar_takes_the_classifier_which_defaults_to_shaded() {
+        let attached = ShadeCfg { attached: true, ..Default::default() };
+        assert_eq!(shaded(&attached), PathBuf::from("t/app-1.0-shaded.jar"));
+        let named = ShadeCfg { attached: true, classifier: Some("all".into()), ..Default::default() };
+        assert_eq!(shaded(&named), PathBuf::from("t/app-1.0-all.jar"));
+    }
+
+    #[test]
+    fn final_name_wins_and_is_interpolated() {
+        let cfg = ShadeCfg { final_name: Some("x-${project.version}-fat".into()), attached: true, ..Default::default() };
+        assert_eq!(shaded(&cfg), PathBuf::from("t/x-1.0-fat.jar"));
     }
 
     #[test]

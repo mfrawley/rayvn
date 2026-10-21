@@ -28,6 +28,8 @@ struct Node {
     dep: Dep,
     version: String,
     scope: String,
+    /// Scope as the declaring POM wrote it, before mediation against the parent's scope.
+    declared: String,
     depth: usize,
     via: Option<String>,
     parent: Option<String>,
@@ -59,12 +61,29 @@ struct Tree {
     chosen: HashMap<String, Node>,
     children: HashMap<String, Vec<String>>,
     roots: Vec<String>,
+    /// Every (parent, child, declared scope) seen, including edges to nodes that lost version mediation.
+    edges: Vec<(String, String, String)>,
+}
+
+/// Maven's scope selection when one artifact is reached by several paths: compile beats everything,
+/// runtime beats provided only in combination with it (they merge to compile), provided and runtime beat test.
+fn merge_scopes<'a>(a: &'a str, b: &'a str) -> &'a str {
+    match (a, b) {
+        _ if a == b => a,
+        ("compile", _) | (_, "compile") | ("runtime", "provided") | ("provided", "runtime") => "compile",
+        ("runtime", _) | (_, "runtime") => "runtime",
+        ("provided", _) | (_, "provided") => "provided",
+        _ => a,
+    }
 }
 
 impl Tree {
     /// Records `node` unless its key is already taken; true if it was new.
     fn admit(&mut self, node: &Node) -> bool {
         let key = node.dep.key();
+        if let Some(parent) = &node.parent {
+            self.edges.push((parent.clone(), key.clone(), node.declared.clone()));
+        }
         if self.chosen.contains_key(&key) {
             return false;
         }
@@ -74,6 +93,30 @@ impl Tree {
         }
         self.chosen.insert(key, node.clone());
         true
+    }
+
+    /// Widens the scope of each transitive node to the broadest any path to it gives, until nothing changes.
+    /// Direct dependencies keep their declared scope.
+    fn widen_scopes(&mut self) {
+        loop {
+            let mut changed = false;
+            for (parent, child, declared) in &self.edges {
+                let Some(via) = mediate(&self.chosen[parent].scope, declared) else { continue };
+                let node = &self.chosen[child];
+                if node.parent.is_none() {
+                    continue;
+                }
+                let merged = merge_scopes(&node.scope, via);
+                if merged != node.scope {
+                    let merged = merged.to_string();
+                    self.chosen.get_mut(child).unwrap().scope = merged;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
     }
 
     /// Maven's classpath order: depth-first, pre-order walk of the mediated tree; duplicate classes resolve to the first jar.
@@ -101,7 +144,7 @@ fn root_nodes(deps: &[Dep], include_test: bool) -> Result<Vec<Node>> {
         let Some(version) = d.version.clone() else {
             anyhow::bail!("dependency {}:{} has no version", d.group, d.artifact);
         };
-        nodes.push(Node { dep: d.clone(), version, scope, depth: 1, via: None, parent: None, exclusions: d.exclusions.clone() });
+        nodes.push(Node { dep: d.clone(), version, declared: scope.clone(), scope, depth: 1, via: None, parent: None, exclusions: d.exclusions.clone() });
     }
     Ok(nodes)
 }
@@ -115,11 +158,12 @@ fn child_nodes(parent: &Node, deps: &[Dep], managed: &HashMap<String, Dep>) -> V
         if c.optional || excluded(&parent.exclusions, c) {
             continue;
         }
-        let Some(scope) = mediate(&parent.scope, c.scope.as_deref().unwrap_or("compile")) else { continue };
+        let declared = c.scope.as_deref().unwrap_or("compile");
+        let Some(scope) = mediate(&parent.scope, declared) else { continue };
         let Some(version) = managed.get(&c.key()).and_then(|m| m.version.clone()).or_else(|| c.version.clone()) else { continue };
         let mut exclusions = parent.exclusions.clone();
         exclusions.extend(c.exclusions.iter().cloned());
-        kids.push(Node { dep: c.clone(), version, scope: scope.into(), depth: parent.depth + 1, via: Some(via.clone()), parent: Some(parent.dep.key()), exclusions });
+        kids.push(Node { dep: c.clone(), version, scope: scope.into(), declared: declared.into(), depth: parent.depth + 1, via: Some(via.clone()), parent: Some(parent.dep.key()), exclusions });
     }
     kids
 }
@@ -156,6 +200,7 @@ pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: b
         Ok(())
     })?;
 
+    tree.widen_scopes();
     let results: Vec<Result<Resolved>> = tree
         .classpath_order()
         .par_iter()
@@ -229,6 +274,7 @@ mod tests {
         Node {
             version: d.version.clone().unwrap_or_default(),
             scope: "compile".into(),
+            declared: "compile".into(),
             depth: parent.map_or(1, |p| p.depth + 1),
             via: None,
             parent: parent.map(|p| p.dep.key()),
@@ -299,5 +345,54 @@ mod tests {
         let order: Vec<_> = t.classpath_order().iter().map(|k| k.split(':').nth(1).unwrap().to_string()).collect();
         assert_eq!(order, ["a", "a1", "a2", "b"]);
         assert_eq!(t.chosen[&a1.dep.key()].version, "1");
+    }
+
+    fn kid(artifact: &str, parent: &Node, declared: &str) -> Node {
+        let mut n = node(dep(artifact, Some("1"), Some(declared)), Some(parent));
+        n.declared = declared.into();
+        n.scope = mediate(&parent.scope, declared).unwrap().into();
+        n
+    }
+
+    #[test]
+    fn merging_scopes_follows_maven() {
+        assert_eq!(merge_scopes("test", "compile"), "compile");
+        assert_eq!(merge_scopes("test", "runtime"), "runtime");
+        assert_eq!(merge_scopes("test", "provided"), "provided");
+        assert_eq!(merge_scopes("provided", "runtime"), "compile");
+        assert_eq!(merge_scopes("runtime", "runtime"), "runtime");
+    }
+
+    #[test]
+    fn a_later_compile_path_widens_a_nearer_test_path_and_its_subtree() {
+        let mut t = Tree::default();
+        let mut junit = node(dep("junit", Some("1"), Some("test")), None);
+        junit.scope = "test".into();
+        junit.declared = "test".into();
+        let lib = node(dep("lib", Some("1"), None), None);
+        let api_via_junit = kid("api", &junit, "compile");
+        let api_via_lib = kid("api", &lib, "compile");
+        let leaf = kid("leaf", &api_via_junit, "compile");
+        for n in [&junit, &lib, &api_via_junit, &leaf] {
+            assert!(t.admit(n));
+        }
+        assert!(!t.admit(&api_via_lib));
+        assert_eq!(t.chosen[&api_via_junit.dep.key()].scope, "test");
+        t.widen_scopes();
+        assert_eq!(t.chosen[&api_via_junit.dep.key()].scope, "compile");
+        assert_eq!(t.chosen[&leaf.dep.key()].scope, "compile");
+        assert_eq!(t.chosen[&junit.dep.key()].scope, "test");
+    }
+
+    #[test]
+    fn direct_dependencies_keep_their_declared_scope() {
+        let mut t = Tree::default();
+        let mut junit = node(dep("junit", Some("1"), Some("test")), None);
+        junit.scope = "test".into();
+        let lib = node(dep("lib", Some("1"), None), None);
+        let junit_via_lib = kid("junit", &lib, "compile");
+        assert!(t.admit(&junit) && t.admit(&lib) && !t.admit(&junit_via_lib));
+        t.widen_scopes();
+        assert_eq!(t.chosen[&junit.dep.key()].scope, "test");
     }
 }
