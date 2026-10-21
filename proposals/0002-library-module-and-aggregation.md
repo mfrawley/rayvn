@@ -77,7 +77,7 @@ Steps 1 to 3 are done (`src/reactor.rs`, `docs/workspace.md`); step 4 is not: mo
 
 A whole-checkout build from the root POM of a 40-POM repository: 23 modules built, `rvn build` 35.6 s (warm cache) after a 4 min 44 s cold `rvn lock`, exit 0. Getting there needed four changes, each found by the run:
 
-- `[workspace] exclude = [...]` in `rayvn.toml`: the checkout has an `archive` aggregator and an infrastructure module (version range, `exec` plugin) that are not part of this build. Documented in `docs/workspace.md`.
+- `[workspace] exclude = [...]` in `rayvn.toml`: the checkout has an `archive` aggregator (legacy and GUI code) that is not part of this build. Documented in `docs/workspace.md`.
 - Profile activation `<property><name>x</name><value>!true</value></property>` now holds when `x` is unset. JavaFX picks its platform jar this way (`${javafx.platform}`), so any JavaFX dependency failed before.
 - `<relocation>` is followed (`org.lz4:lz4-java:1.8.1` moved to `at.yawk.lz4`), with a warning. Only a node that wins mediation is loaded, so a losing candidate can never fail on its POM.
 - Shade `<filters>` with `*:*` matched nothing (the pattern was turned into a glob that cannot cross `:`), leaving `.SF`/`.RSA` signature files in fat jars.
@@ -90,7 +90,7 @@ Jar diff against Maven (same commit, all 23 modules, 26 jars; `mvn package` 2:29
 
 What is left is not rayvn: Maven writes empty files as four NUL bytes; and one module resolved a different `analysis-0.4.7.jar` because the copy in `~/.m2` does not match its own `.sha1`. Gradle (`reproducibleFileOrder`, `preserveFileTimestamps = false`) and Bazel (fixed timestamps, sorted entries by default) make jars reproducible; rayvn now does too: every entry has the zip epoch as its time and mode 0644, entries are sorted, and `target/classes` is emptied before each compile so a deleted source or resource cannot linger. Two builds of all 23 modules, seconds apart, give identical jars.
 
-Not supported, and the reason a module was left out: the `protoc` and `exec` plugins (not run; the POM of `routing-map-conversion` has its protoc plugin commented out, so it needs none). Left out on purpose: `archive`, which holds legacy and GUI code.
+Not supported: the `protoc` and `exec` plugins (not run). No module needs them to build: `routing-map-conversion` has its protoc plugin commented out, and `aws-infra` declares `exec-maven-plugin` only for a manual `mvn exec:java`, bound to no phase. Left out on purpose: `archive`, which holds legacy and GUI code.
 
 ### Versions across modules
 
@@ -112,7 +112,7 @@ allow = ["org.matsim:matsim"]
 
 ### Version ranges
 
-`aws-infra` (constructs `[10.0.0,11.0.0)`) now locks: 10.8.1, the highest 10.x listed, and 71 artifacts. It stays in the `exclude` list because it also needs the `exec` plugin, which rayvn does not run. See `docs/version-ranges.md`.
+`aws-infra` (constructs `[10.0.0,11.0.0)`) now locks: 10.8.1, the highest 10.x listed, and 71 artifacts. It builds with the rest of the workspace (it was excluded earlier only because of the range; the `exec` plugin it declares is bound to no phase and is used only by hand). See `docs/version-ranges.md`.
 
 ### Bumping a dependency across modules (0-day response)
 
