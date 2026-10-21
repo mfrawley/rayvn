@@ -1,7 +1,7 @@
 //! `rayvn.lock`: the resolved dependency set with versions, source repositories and SHA-256 checksums.
 //! It is valid only while the hash of `pom.xml` it records still matches ([`read_fresh`]).
 
-use crate::pom::{Gav, RepoDecl};
+use crate::pom::{Gav, RepoDecl, extension_of, stored_classifier};
 use crate::repos::{ArtifactFile, Repos};
 use crate::resolve::Resolved;
 use anyhow::{Context, Result};
@@ -176,12 +176,12 @@ pub fn realize(
             let jar = if p.typ == "pom" {
                 None
             } else if p.workspace {
-                Some(locals.output(&gav, p.classifier.as_deref().or(if p.typ == "test-jar" { Some("tests") } else { None }), &p.typ).with_context(|| {
+                Some(locals.output(&gav, stored_classifier(&p.typ, p.classifier.as_deref()), &p.typ).with_context(|| {
                     format!("rayvn.lock names {gav} as a module of the build, but it is not one of the modules being built; run `rvn lock`")
                 })?)
             } else {
-                let ext = if matches!(p.typ.as_str(), "bundle" | "maven-plugin" | "test-jar") { "jar" } else { p.typ.as_str() };
-                let classifier = p.classifier.as_deref().or(if p.typ == "test-jar" { Some("tests") } else { None });
+                let ext = extension_of(&p.typ);
+                let classifier = stored_classifier(&p.typ, p.classifier.as_deref());
                 let loc = repos
                     .get_locked(p.repo.as_deref(), &ArtifactFile { group: &p.group, artifact: &p.artifact, version: &p.version, classifier, ext }, p.sha256.as_deref())?
                     .with_context(|| format!("locked artifact not found in any repository: {}:{}:{}", p.group, p.artifact, p.version))?;
@@ -215,7 +215,7 @@ pub fn verify(lock: &Lock, resolved: &[Resolved]) -> Result<(usize, usize)> {
     let results: Vec<Result<Option<()>, String>> = checks
         .par_iter()
         .map(
-            |(p, jar)| match (&p.sha256, p.version.ends_with("-SNAPSHOT")) {
+            |(p, jar)| match (&p.sha256, crate::version::is_snapshot(&p.version)) {
                 (Some(want), false) => match crate::repos::sha256_file(jar) {
                     Ok(got) if &got == want => Ok(Some(())),
                     Ok(got) => Err(format!(

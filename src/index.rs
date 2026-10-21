@@ -31,9 +31,51 @@ pub struct SnapshotStamp {
     pub checked: u64,
 }
 
+/// Whether a request carried credentials. Private repositories answer 404 to anonymous ones, so a recorded miss
+/// only holds for the same state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Auth {
+    Authenticated,
+    Anonymous,
+}
+
+impl Auth {
+    fn as_str(self) -> &'static str {
+        match self {
+            Auth::Authenticated => "auth",
+            Auth::Anonymous => "anon",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Auth> {
+        [Auth::Authenticated, Auth::Anonymous]
+            .into_iter()
+            .find(|a| a.as_str() == s)
+    }
+}
+
+/// A file a repository answered 404 for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MissKey {
+    pub repo: String,
+    pub auth: Auth,
+    /// Repository-relative path, e.g. `org/x/y/1.0/y-1.0.jar`.
+    pub path: String,
+}
+
+impl MissKey {
+    pub fn new(repo: &str, auth: Auth, path: &str) -> Self {
+        MissKey {
+            repo: repo.to_string(),
+            auth,
+            path: path.to_string(),
+        }
+    }
+}
+
 #[derive(Default, Debug, PartialEq)]
 struct State {
-    misses: HashMap<String, u64>,
+    misses: HashMap<MissKey, u64>,
     snaps: HashMap<String, SnapshotStamp>,
     vals: HashMap<String, Validators>,
     origins: HashMap<String, String>,
@@ -85,6 +127,15 @@ fn clean(s: &str) -> String {
     s.replace(['\t', '\n', '\r'], " ")
 }
 
+fn miss_line(k: &MissKey, ts: u64) -> String {
+    Tag::Miss.line(&[
+        &ts.to_string(),
+        &clean(&k.repo),
+        k.auth.as_str(),
+        &clean(&k.path),
+    ])
+}
+
 fn parse(text: &str, now: u64, miss_ttl: u64, use_misses: bool) -> State {
     let mut st = State::default();
     for line in text.lines() {
@@ -95,10 +146,10 @@ fn parse(text: &str, now: u64, miss_ttl: u64, use_misses: bool) -> State {
         };
         match (tag, &f[1..]) {
             (Tag::Miss, [ts, repo, auth, path]) if use_misses => {
-                if let Ok(ts) = ts.parse::<u64>()
+                if let (Ok(ts), Some(auth)) = (ts.parse::<u64>(), Auth::parse(auth))
                     && now.saturating_sub(ts) < miss_ttl
                 {
-                    st.misses.insert(format!("{repo}\t{auth}\t{path}"), ts);
+                    st.misses.insert(MissKey::new(repo, auth, path), ts);
                 }
             }
             (Tag::Snap, [path, repo, value, checked]) => {
@@ -136,8 +187,7 @@ fn parse(text: &str, now: u64, miss_ttl: u64, use_misses: bool) -> State {
 fn format_state(st: &State) -> String {
     let mut lines = vec![];
     for (k, ts) in &st.misses {
-        let key: Vec<&str> = k.split('\t').collect();
-        lines.push(Tag::Miss.line(&[&[ts.to_string().as_str()], key.as_slice()].concat()));
+        lines.push(miss_line(k, *ts));
     }
     for (p, s) in &st.snaps {
         lines.push(Tag::Snap.line(&[p, &s.repo, &s.value, &s.checked.to_string()]));
@@ -196,26 +246,23 @@ impl Index {
         }
     }
 
-    pub fn has_miss(&self, key: &str) -> bool {
+    pub fn has_miss(&self, key: &MissKey) -> bool {
         self.state.lock().unwrap().misses.contains_key(key)
     }
 
-    /// `key` is `<repo>\t<auth|anon>\t<path>`.
-    pub fn add_miss(&self, key: &str, now: u64) {
+    pub fn add_miss(&self, key: &MissKey, now: u64) {
         if self.miss_ttl == 0
             || self
                 .state
                 .lock()
                 .unwrap()
                 .misses
-                .insert(key.to_string(), now)
+                .insert(key.clone(), now)
                 .is_some()
         {
             return;
         }
-        let fields: Vec<String> = key.split('\t').map(clean).collect();
-        let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
-        self.append(&Tag::Miss.line(&[&[now.to_string().as_str()], fields.as_slice()].concat()));
+        self.append(&miss_line(key, now));
     }
 
     pub fn snapshot(&self, path: &str) -> Option<SnapshotStamp> {
@@ -277,6 +324,29 @@ mod tests {
         }
     }
 
+    fn miss(repo: &str, path: &str) -> MissKey {
+        MissKey::new(repo, Auth::Anonymous, path)
+    }
+
+    #[test]
+    fn a_miss_only_holds_for_the_auth_state_it_was_recorded_in() {
+        let mut st = State::default();
+        st.misses.insert(miss("r", "p"), 7);
+        let again = parse(&format_state(&st), 8, 100, true);
+        assert!(again.misses.contains_key(&miss("r", "p")));
+        assert!(
+            !again
+                .misses
+                .contains_key(&MissKey::new("r", Auth::Authenticated, "p"))
+        );
+    }
+
+    #[test]
+    fn a_miss_line_with_an_unknown_auth_state_is_skipped() {
+        let st = parse("miss\t990\tr\tweird\tp\n", 1000, 50, true);
+        assert!(st.misses.is_empty());
+    }
+
     #[test]
     fn every_tag_round_trips_and_unknown_ones_are_skipped() {
         for t in [Tag::Miss, Tag::Snap, Tag::From, Tag::Val] {
@@ -291,9 +361,9 @@ mod tests {
     fn expired_misses_are_dropped_and_later_lines_win() {
         let text = "miss\t100\tcentral\tanon\ta/b\nmiss\t990\tcentral\tanon\tc/d\nmiss\t100\tr\tanon\tp\nmiss\t990\tr\tanon\tp\n";
         let st = parse(text, 1000, 50, true);
-        let mut keys: Vec<_> = st.misses.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-        keys.sort();
-        assert_eq!(keys, [("central\tanon\tc/d", 990), ("r\tanon\tp", 990)]);
+        let mut keys: Vec<_> = st.misses.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        keys.sort_by_key(|(k, _)| k.path.clone());
+        assert_eq!(keys, [(miss("central", "c/d"), 990), (miss("r", "p"), 990)]);
     }
 
     #[test]
@@ -307,7 +377,8 @@ mod tests {
     #[test]
     fn state_round_trips_through_the_file_format() {
         let mut st = State::default();
-        st.misses.insert("r\tauth\tp".into(), 7);
+        st.misses
+            .insert(MissKey::new("r", Auth::Authenticated, "p"), 7);
         st.snaps.insert("a/x-1-SNAPSHOT.jar".into(), stamp());
         st.vals.insert(
             "a/maven-metadata-r.xml".into(),
@@ -341,7 +412,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let _ = std::fs::remove_file(dir.join(".rayvn-index.tsv"));
         let i = Index::load(&dir, 100, 50, true);
-        i.add_miss("r\tanon\tp", 100);
+        i.add_miss(&miss("r", "p"), 100);
         i.set_snapshot("s.jar", stamp());
         i.set_validators(
             "m.xml",
@@ -353,7 +424,7 @@ mod tests {
         i.set_origin("a/x-1.jar", "r");
         i.set_origin("a/x-1.jar", "r");
         let j = Index::load(&dir, 120, 50, true);
-        assert!(j.has_miss("r\tanon\tp"));
+        assert!(j.has_miss(&miss("r", "p")));
         assert_eq!(j.origin("a/x-1.jar").as_deref(), Some("r"));
         assert_eq!(
             std::fs::read_to_string(dir.join(".rayvn-index.tsv"))
@@ -368,7 +439,7 @@ mod tests {
             j.validators("m.xml").unwrap().last_modified.as_deref(),
             Some("lm")
         );
-        assert!(!Index::load(&dir, 200, 50, true).has_miss("r\tanon\tp"));
+        assert!(!Index::load(&dir, 200, 50, true).has_miss(&miss("r", "p")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -34,6 +34,24 @@ impl std::fmt::Display for Gav {
     }
 }
 
+/// The classifier an artifact of `typ` is stored under: `test-jar` is `tests` unless one is given.
+/// [Maven: type `test-jar`](https://maven.apache.org/ref/current/maven-core/artifact-handlers.html)
+pub fn stored_classifier<'a>(typ: &str, classifier: Option<&'a str>) -> Option<&'a str> {
+    classifier.or(if typ == "test-jar" {
+        Some("tests")
+    } else {
+        None
+    })
+}
+
+/// The file extension of an artifact of `typ`: `bundle`, `maven-plugin` and `test-jar` are all plain jars.
+pub fn extension_of(typ: &str) -> &str {
+    match typ {
+        "bundle" | "maven-plugin" | "test-jar" => "jar",
+        other => other,
+    }
+}
+
 /// A `<dependency>` as written.
 /// [Dependency element reference](https://maven.apache.org/pom.html#dependencies)
 #[derive(Clone, Debug, Default)]
@@ -723,6 +741,18 @@ fn parse_raw(xml: &str) -> Result<RawPom> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_types_map_to_extension_and_classifier() {
+        for typ in ["bundle", "maven-plugin", "test-jar", "jar"] {
+            assert_eq!(extension_of(typ), "jar");
+        }
+        assert_eq!(extension_of("pom"), "pom");
+        assert_eq!(extension_of("zip"), "zip");
+        assert_eq!(stored_classifier("test-jar", None), Some("tests"));
+        assert_eq!(stored_classifier("test-jar", Some("x")), Some("x"));
+        assert_eq!(stored_classifier("jar", None), None);
+    }
 
     fn javafx_style(os_name: &str, platform: &str) -> String {
         format!(

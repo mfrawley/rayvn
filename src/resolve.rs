@@ -2,7 +2,7 @@
 //! mediation, exclusions and optional dependencies. POMs at each depth are loaded in parallel.
 
 use crate::model::{Effective, Loader, LocalModules};
-use crate::pom::{Dep, Gav, Relocation};
+use crate::pom::{Dep, Gav, Relocation, extension_of, stored_classifier};
 use crate::repos::{Located, Repos};
 use crate::version::Constraint;
 use anyhow::{Context, Result};
@@ -405,14 +405,8 @@ fn locate(
     }
 }
 
-/// The classifier a dependency is stored under: `test-jar` is the `tests` classifier unless one is given.
-/// [Maven: type `test-jar`](https://maven.apache.org/ref/current/maven-core/artifact-handlers.html)
 fn classifier_of(d: &Dep) -> Option<&str> {
-    d.classifier.as_deref().or(if d.typ == "test-jar" {
-        Some("tests")
-    } else {
-        None
-    })
+    stored_classifier(&d.typ, d.classifier.as_deref())
 }
 
 fn to_resolved(n: &Node, loc: Option<Located>, workspace: bool) -> Result<Resolved> {
@@ -469,18 +463,12 @@ fn fetch_jar(repos: &Repos, locals: &LocalModules, n: &Node) -> Result<Option<Lo
             classifier_of(&n.dep).unwrap_or(&n.dep.typ)
         );
     }
-    let typ = n.dep.typ.as_str();
-    let ext = if matches!(typ, "bundle" | "maven-plugin" | "test-jar") {
-        "jar"
-    } else {
-        typ
-    };
     repos.get(
         &n.dep.group,
         &n.dep.artifact,
         &n.version,
         classifier_of(&n.dep),
-        ext,
+        extension_of(&n.dep.typ),
     )
 }
 

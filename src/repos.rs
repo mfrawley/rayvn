@@ -1,10 +1,11 @@
 //! Where artifacts come from: the ordered list of remote repositories (with routes, hints, mirrors, proxies
 //! and credentials), the local cache, the miss cache, SNAPSHOT revalidation and parallel downloads.
 
-use crate::index::{Index, SnapshotStamp, Validators};
+use crate::index::{Auth, Index, MissKey, SnapshotStamp, Validators};
 use crate::pom::RepoDecl;
 use crate::secret::Secret;
 use crate::settings::{Config, Route, Settings, expand_strict};
+use crate::version::is_snapshot;
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -51,10 +52,20 @@ pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+const CENTRAL_ID: &str = "central";
+const CENTRAL_URL: &str = "https://repo1.maven.org/maven2";
+
 #[derive(Debug, Clone)]
 pub struct Remote {
     pub id: String,
     pub url: String,
+}
+
+impl Remote {
+    /// Maven Central, whatever a POM or mirror calls it.
+    fn is_central(&self) -> bool {
+        self.id == CENTRAL_ID || self.url.trim_end_matches('/') == CENTRAL_URL
+    }
 }
 
 pub struct Repos {
@@ -109,8 +120,8 @@ impl Repos {
             url: r.url.clone(),
         }));
         all.push(RepoDecl {
-            id: "central".into(),
-            url: "https://repo1.maven.org/maven2".into(),
+            id: CENTRAL_ID.into(),
+            url: CENTRAL_URL.into(),
         });
 
         let mut remotes: Vec<Remote> = vec![];
@@ -315,7 +326,7 @@ impl Repos {
     ) -> Result<Option<Located>> {
         let rel = Self::relative_path(group, artifact, version, classifier, ext);
         let local = self.local.join(&rel);
-        let snapshot = version.ends_with("-SNAPSHOT");
+        let snapshot = is_snapshot(version);
         if local.is_file() {
             if snapshot
                 && let Some(updated) =
@@ -351,12 +362,12 @@ impl Repos {
                 continue;
             }
             // Private repos answer 404 to anonymous requests, so a miss only counts for the same auth state.
-            let authed = if self.auth.read().unwrap().contains_key(&r.id) {
-                "auth"
+            let auth = if self.auth.read().unwrap().contains_key(&r.id) {
+                Auth::Authenticated
             } else {
-                "anon"
+                Auth::Anonymous
             };
-            let miss_key = format!("{}\t{authed}\t{rel}", r.id);
+            let miss_key = MissKey::new(&r.id, auth, &rel);
             if self.index.has_miss(&miss_key) {
                 self.avoided.fetch_add(1, Ordering::Relaxed);
                 continue;
@@ -585,7 +596,7 @@ impl Repos {
                 repo: self.origin(&rel),
             }));
         }
-        if let Some(hit) = self.read_only_hit(&rel, version.ends_with("-SNAPSHOT")) {
+        if let Some(hit) = self.read_only_hit(&rel, is_snapshot(version)) {
             return Ok(Some(hit));
         }
         let known = repo.and_then(|id| {
@@ -957,9 +968,7 @@ fn hinted_order(
         }
     }
     if central_second
-        && let Some(c) = remotes.iter().find(|r| {
-            r.id == "central" || r.url.trim_end_matches('/') == "https://repo1.maven.org/maven2"
-        })
+        && let Some(c) = remotes.iter().find(|r| r.is_central())
         && !out.iter().any(|o| o.id == c.id)
     {
         out.push(c.clone());
@@ -1070,7 +1079,30 @@ fn run_helper(argv: &[String], user: Option<&str>) -> Result<Secret> {
     })
 }
 
-fn config_auth(c: &crate::settings::RepoCfg) -> Result<Option<Cred>> {
+/// Where a repository's credential comes from, as configured in `config.toml` / `rayvn.toml`.
+#[derive(Debug, PartialEq)]
+enum CredSource {
+    BearerEnv(String),
+    BasicEnv {
+        user_env: String,
+        password_env: String,
+    },
+    BearerCmd(Vec<String>),
+    PasswordCmd {
+        argv: Vec<String>,
+        user: UserName,
+    },
+}
+
+/// The username that goes with a `password_cmd`.
+#[derive(Debug, PartialEq)]
+enum UserName {
+    Literal(String),
+    Env(String),
+}
+
+/// `None` when the repository configures no credentials; an error when the combination is ambiguous.
+fn cred_source(c: &crate::settings::RepoCfg) -> Result<Option<CredSource>> {
     let bad = || {
         anyhow::anyhow!(
             "repository '{}': use exactly one of token_env, user_env+password_env, token_cmd, or password_cmd+user",
@@ -1086,37 +1118,56 @@ fn config_auth(c: &crate::settings::RepoCfg) -> Result<Option<Cred>> {
     ) {
         (None, None, None, None, None) if c.user.is_none() => Ok(None),
         (Some(t), None, None, None, None) if c.user.is_none() => {
-            let t = t.clone();
-            Ok(Some(Cred::new(move || {
-                Ok(Secret::new(format!("Bearer {}", env_var(&t)?)))
-            })))
+            Ok(Some(CredSource::BearerEnv(t.clone())))
         }
         (None, Some(u), Some(p), None, None) if c.user.is_none() => {
-            let (u, p) = (u.clone(), p.clone());
-            Ok(Some(Cred::new(move || {
-                Ok(basic(&env_var(&u)?, &env_var(&p)?))
-            })))
+            Ok(Some(CredSource::BasicEnv {
+                user_env: u.clone(),
+                password_env: p.clone(),
+            }))
         }
         (None, None, None, Some(argv), None) if c.user.is_none() => {
-            let argv = argv.clone();
-            Ok(Some(Cred::new(move || run_helper(&argv, None))))
+            Ok(Some(CredSource::BearerCmd(argv.clone())))
         }
-        (None, _, None, None, Some(argv)) => {
-            if c.user.is_some() == c.user_env.is_some() {
-                return Err(bad());
-            }
-            let (argv, lit, env) = (argv.clone(), c.user.clone(), c.user_env.clone());
-            Ok(Some(Cred::new(move || {
-                let user = match (&lit, &env) {
-                    (Some(u), _) => u.clone(),
-                    (None, Some(e)) => env_var(e)?,
-                    (None, None) => unreachable!(),
-                };
-                run_helper(&argv, Some(&user))
-            })))
+        (None, env, None, None, Some(argv)) => {
+            let user = match (&c.user, env) {
+                (Some(u), None) => UserName::Literal(u.clone()),
+                (None, Some(e)) => UserName::Env(e.clone()),
+                _ => return Err(bad()),
+            };
+            Ok(Some(CredSource::PasswordCmd {
+                argv: argv.clone(),
+                user,
+            }))
         }
         _ => Err(bad()),
     }
+}
+
+impl CredSource {
+    fn into_cred(self) -> Cred {
+        match self {
+            CredSource::BearerEnv(t) => {
+                Cred::new(move || Ok(Secret::new(format!("Bearer {}", env_var(&t)?))))
+            }
+            CredSource::BasicEnv {
+                user_env,
+                password_env,
+            } => Cred::new(move || Ok(basic(&env_var(&user_env)?, &env_var(&password_env)?))),
+            CredSource::BearerCmd(argv) => Cred::new(move || run_helper(&argv, None)),
+            CredSource::PasswordCmd { argv, user } => Cred::new(move || {
+                let user = match &user {
+                    UserName::Literal(u) => u.clone(),
+                    UserName::Env(e) => env_var(e)?,
+                };
+                run_helper(&argv, Some(&user))
+            }),
+        }
+    }
+}
+
+fn config_auth(c: &crate::settings::RepoCfg) -> Result<Option<Cred>> {
+    Ok(cred_source(c)?.map(CredSource::into_cred))
 }
 
 fn build_proxy(p: &crate::settings::ProxyCfg) -> Result<reqwest::Proxy> {
@@ -1248,6 +1299,100 @@ mod tests {
             id: id.into(),
             url: format!("https://{id}.example/repo"),
         }
+    }
+
+    fn cfg(f: impl FnOnce(&mut crate::settings::RepoCfg)) -> crate::settings::RepoCfg {
+        let mut c = crate::settings::RepoCfg {
+            id: "r".into(),
+            url: "https://r.example".into(),
+            user_env: None,
+            password_env: None,
+            token_env: None,
+            token_cmd: None,
+            password_cmd: None,
+            user: None,
+        };
+        f(&mut c);
+        c
+    }
+
+    #[test]
+    fn each_credential_form_has_its_own_source() {
+        let s = |c| cred_source(&c).unwrap();
+        assert_eq!(s(cfg(|_| {})), None);
+        assert_eq!(
+            s(cfg(|c| c.token_env = Some("T".into()))),
+            Some(CredSource::BearerEnv("T".into()))
+        );
+        assert_eq!(
+            s(cfg(|c| {
+                c.user_env = Some("U".into());
+                c.password_env = Some("P".into());
+            })),
+            Some(CredSource::BasicEnv {
+                user_env: "U".into(),
+                password_env: "P".into()
+            })
+        );
+        assert_eq!(
+            s(cfg(|c| c.token_cmd = Some(vec!["t".into()]))),
+            Some(CredSource::BearerCmd(vec!["t".into()]))
+        );
+        let with_cmd = |c: &mut crate::settings::RepoCfg| c.password_cmd = Some(vec!["p".into()]);
+        assert_eq!(
+            s(cfg(|c| {
+                with_cmd(c);
+                c.user = Some("me".into());
+            })),
+            Some(CredSource::PasswordCmd {
+                argv: vec!["p".into()],
+                user: UserName::Literal("me".into())
+            })
+        );
+        assert_eq!(
+            s(cfg(|c| {
+                with_cmd(c);
+                c.user_env = Some("U".into());
+            })),
+            Some(CredSource::PasswordCmd {
+                argv: vec!["p".into()],
+                user: UserName::Env("U".into())
+            })
+        );
+    }
+
+    #[test]
+    fn ambiguous_or_incomplete_credentials_are_rejected_naming_the_repo() {
+        let with_cmd = |c: &mut crate::settings::RepoCfg| c.password_cmd = Some(vec!["p".into()]);
+        let bad: Vec<crate::settings::RepoCfg> = vec![
+            cfg(|c| {
+                c.token_env = Some("T".into());
+                c.token_cmd = Some(vec!["t".into()]);
+            }),
+            cfg(|c| c.user_env = Some("U".into())),
+            cfg(|c| c.user = Some("me".into())),
+            cfg(with_cmd),
+            cfg(|c| {
+                with_cmd(c);
+                c.user = Some("me".into());
+                c.user_env = Some("U".into());
+            }),
+        ];
+        for c in bad {
+            let e = cred_source(&c).unwrap_err().to_string();
+            assert!(e.contains("repository 'r'"), "{e}");
+        }
+    }
+
+    #[test]
+    fn central_is_recognised_by_id_or_by_url() {
+        assert!(remote("central").is_central());
+        let by_url = Remote {
+            id: "mirror".into(),
+            url: format!("{CENTRAL_URL}/"),
+        };
+        assert!(by_url.is_central());
+        assert!(!remote("a").is_central());
     }
 
     fn hint(repo: &str, groups: &[&str]) -> Hint {

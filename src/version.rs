@@ -9,6 +9,11 @@
 use anyhow::{Result, bail};
 use std::cmp::Ordering;
 
+/// Whether `version` is a Maven SNAPSHOT: a moving target, not a release.
+pub fn is_snapshot(version: &str) -> bool {
+    version.ends_with("-SNAPSHOT")
+}
+
 const QUALIFIERS: [&str; 7] = ["alpha", "beta", "milestone", "rc", "snapshot", "", "sp"];
 
 #[derive(Debug, Clone)]
@@ -351,7 +356,7 @@ impl Constraint {
     pub fn best(&self, available: &[String]) -> Option<String> {
         available
             .iter()
-            .filter(|v| !v.ends_with("-SNAPSHOT"))
+            .filter(|v| !is_snapshot(v))
             .map(|v| Version::parse(v))
             .filter(|v| self.contains(v))
             .max()
@@ -449,6 +454,13 @@ mod tests {
         ]);
         ascending(&["10.0.0", "10.178.1", "10.999.0", "11.0.0"]);
         ascending(&["33.0.0-jre", "33.1.0-jre"]);
+    }
+
+    #[test]
+    fn only_a_trailing_snapshot_marks_a_snapshot() {
+        assert!(is_snapshot("1.0-SNAPSHOT"));
+        assert!(!is_snapshot("1.0"));
+        assert!(!is_snapshot("1.0-SNAPSHOT-2"));
     }
 
     #[test]
