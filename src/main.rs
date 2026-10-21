@@ -2,8 +2,8 @@
 //! the steps.
 
 use anyhow::{Context, Result, bail};
-use rayvn::{build, lock, model, repos, resolve, settings, verify, version};
-use std::path::{Path, PathBuf};
+use rayvn::{build, lock, model, reactor, repos, resolve, settings, verify, version};
+use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() {
@@ -25,7 +25,7 @@ fn print_banner() {
 }
 
 const COMMANDS: [&str; 7] = ["lock", "fetch", "resolve", "classpath", "build", "test", "verify"];
-const USAGE: &str = "usage: rvn <lock|fetch|resolve|classpath|build|test|verify> [-f pom.xml] [--locked] [--refresh] [--cold] [--rerun] [--test-cache dir]";
+const USAGE: &str = "usage: rvn <lock|fetch|resolve|classpath|build|test|verify> [-f pom.xml] [--locked] [--refresh] [--cold] [--rerun] [--test-cache dir] [-m module]";
 
 #[derive(Debug, PartialEq)]
 struct Args {
@@ -37,6 +37,7 @@ struct Args {
     test: bool,
     rerun: bool,
     test_cache: Option<String>,
+    module: Option<String>,
 }
 
 impl Args {
@@ -52,11 +53,15 @@ impl Args {
             Some(i) => Some(args.get(i + 1).context("--test-cache needs a directory")?.clone()),
             None => None,
         };
+        let module = match args.iter().position(|a| a == "-m" || a == "--module") {
+            Some(i) => Some(args.get(i + 1).context("-m needs a module name")?.clone()),
+            None => None,
+        };
         let cold = flag("--cold");
         if cold && cmd == "classpath" {
             bail!("--cold deletes its cache afterwards, so `classpath` would print paths that no longer exist");
         }
-        Ok(Some(Args { cmd: cmd.clone(), pom_path, locked: flag("--locked"), refresh: cold || flag("--refresh"), cold, test: flag("--test"), rerun: flag("--rerun"), test_cache }))
+        Ok(Some(Args { cmd: cmd.clone(), pom_path, locked: flag("--locked"), refresh: cold || flag("--refresh"), cold, test: flag("--test"), rerun: flag("--rerun"), test_cache, module }))
     }
 
     fn project_dir(&self) -> PathBuf {
@@ -69,36 +74,30 @@ fn cold_cache_dir() -> PathBuf {
     std::env::temp_dir().join(format!("rvn-cold-{}-{nanos}", std::process::id()))
 }
 
-/// The dependency set for `args`: from a fresh `rayvn.lock` when there is one, else resolved from the POM
-/// (and the lock rewritten). The second value is the root project when it had to be loaded.
-fn dependencies(
-    args: &Args,
-    pom_hash: &str,
-    lock_path: &Path,
-    repos: &repos::Repos,
-    loader: &model::Loader,
-) -> Result<(Vec<resolve::Resolved>, Option<model::Effective>)> {
+/// The dependency set of `module` for `args`: from its fresh `rayvn.lock` when there is one, else resolved from the
+/// POM (and the lock rewritten). `lock_hash` covers the module's POMs and those of the modules it depends on.
+fn dependencies(args: &Args, module: &reactor::Module, lock_hash: &str, repos: &repos::Repos, loader: &model::Loader) -> Result<Vec<resolve::Resolved>> {
+    let lock_path = module.lock_path();
     let fetch = args.cmd == "fetch";
-    let fresh = if args.cmd == "lock" || (args.refresh && !fetch) { None } else { lock::read_fresh(lock_path, pom_hash) };
+    let fresh = if args.cmd == "lock" || (args.refresh && !fetch) { None } else { lock::read_fresh(&lock_path, lock_hash) };
     if let Some(l) = fresh {
         eprintln!("  using rayvn.lock ({} packages)", l.package.len());
-        let resolved = lock::realize(&l, repos)?;
+        let resolved = lock::realize(&l, repos, loader.locals())?;
         if fetch {
             let (ok, skipped) = lock::verify(&l, &resolved)?;
-            eprintln!("  verified {ok} files against rayvn.lock ({skipped} not checkable: no checksum recorded, or SNAPSHOT)");
+            eprintln!("  verified {ok} files against rayvn.lock ({skipped} not checkable: no checksum recorded, SNAPSHOT, or a module of this build)");
         }
-        return Ok((resolved, None));
+        return Ok(resolved);
     }
     eprintln!("  resolving dependencies");
     if fetch || args.locked {
-        bail!("rayvn.lock is missing or out of date; run `rvn lock`");
+        bail!("{} is missing or out of date; run `rvn lock`", lock_path.display());
     }
-    let root = loader.from_file(&args.pom_path)?;
-    let resolved = resolve::resolve(&root, loader, repos, true)?;
-    lock::write(lock_path, pom_hash, &resolved, repos)?;
+    let resolved = resolve::resolve(&module.effective, loader, repos, true)?;
+    lock::write(&lock_path, lock_hash, &resolved, repos)?;
     repos.clear_progress();
     eprintln!("  wrote {}", lock_path.display());
-    Ok((resolved, Some(root)))
+    Ok(resolved)
 }
 
 /// Colon-separated jar paths; test-scoped ones only if `include_test`.
@@ -117,6 +116,68 @@ fn resolve_lines(resolved: &[resolve::Resolved]) -> Vec<String> {
         .iter()
         .map(|r| format!("{}{}:{}  [{}] {}", "  ".repeat(r.depth - 1), r.gav.group, r.gav.artifact, r.scope, r.gav.version))
         .collect()
+}
+
+/// What `args.cmd` does for one module, once its dependencies are known. Returns `false` when nothing was built
+/// (so there is nothing to report).
+fn run_module(args: &Args, module: &reactor::Module, resolved: &[resolve::Resolved], provides_tests: bool, cx: &Services) -> Result<()> {
+    let (root, dir) = (&module.effective, module.dir.as_path());
+    match args.cmd.as_str() {
+        "lock" | "fetch" => {}
+        "resolve" => resolve_lines(resolved).iter().for_each(|l| println!("{l}")),
+        "classpath" => println!("{}", classpath_line(resolved, args.test)),
+        "build" | "test" | "verify" => {
+            if root.packaging != "jar" {
+                bail!("packaging '{}' is not supported yet (only jar)", root.packaging);
+            }
+            let main_classes = build::compile_main(root, dir, resolved)?;
+            if args.cmd == "build" {
+                if provides_tests {
+                    verify::compile_tests(root, dir, &main_classes, resolved)?;
+                }
+                return build::package(root, dir, &main_classes, resolved);
+            }
+            let test_classes = verify::compile_tests(root, dir, &main_classes, resolved)?;
+            let run = verify::TestRun {
+                root,
+                dir,
+                main_classes: &main_classes,
+                test_classes: &test_classes,
+                resolved,
+                repos: cx.repos,
+                settings: &cx.config.test,
+                rerun: args.rerun,
+                cache_flag: args.test_cache.as_deref(),
+            };
+            verify::run(verify::Phase::Unit, &run)?;
+            if args.cmd == "verify" {
+                build::package(root, dir, &main_classes, resolved)?;
+                verify::run(verify::Phase::Integration, &run)?;
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+struct Services<'a> {
+    repos: &'a repos::Repos,
+    config: &'a settings::Config,
+}
+
+/// The modules `args` acts on, in build order, aggregators left out. Commands that only read dependencies
+/// (`lock`, `fetch`, `resolve`, `classpath`) take just the module named with `-m`; the others also build what it needs.
+fn pick(args: &Args, modules: &[reactor::Module]) -> Result<Vec<usize>> {
+    let only_named = matches!(args.cmd.as_str(), "lock" | "fetch" | "resolve" | "classpath");
+    let chosen = match (&args.module, only_named) {
+        (Some(m), true) => vec![reactor::find(modules, m)?],
+        (m, _) => reactor::select(modules, m.as_deref())?,
+    };
+    let chosen: Vec<usize> = chosen.into_iter().filter(|&i| !modules[i].is_aggregator()).collect();
+    if chosen.is_empty() {
+        bail!("{} lists modules but none of them builds anything", args.pom_path.display());
+    }
+    Ok(chosen)
 }
 
 fn run() -> Result<()> {
@@ -144,64 +205,42 @@ fn run() -> Result<()> {
     }
     let (config, _) = settings::load_config(&project_dir)?;
 
-    let pom_bytes = std::fs::read(&args.pom_path).with_context(|| format!("reading {}", args.pom_path.display()))?;
-    let pom_hash = lock::hash_bytes(&pom_bytes);
-    let repos = repos::Repos::new(&model::local_repos(&args.pom_path)?, &settings, &config, args.refresh, args.cold)?;
-    let loader = model::Loader::new(&repos);
-    eprintln!("rvn {}: {} ({} repositories, {} routes)", args.cmd, args.pom_path.display(), repos.remote_count(), repos.route_count());
-
-    let (resolved, root) = dependencies(&args, &pom_hash, &project_dir.join("rayvn.lock"), &repos, &loader)?;
-    let direct = resolved.iter().filter(|r| r.depth == 1).count();
-    eprintln!("  {} artifacts ({direct} direct): {}", resolved.len(), repos.summary());
-
-    match args.cmd.as_str() {
-        "lock" | "fetch" => eprintln!("done in {:?}", t0.elapsed()),
-        "resolve" => {
-            resolve_lines(&resolved).iter().for_each(|l| println!("{l}"));
-            eprintln!("done in {:?}", t0.elapsed());
-        }
-        "classpath" => println!("{}", classpath_line(&resolved, args.test)),
-        "build" => {
-            let root = match root {
-                Some(r) => r,
-                None => loader.from_file(&args.pom_path)?,
-            };
-            if root.packaging != "jar" {
-                bail!("packaging '{}' is not supported yet (only jar)", root.packaging);
-            }
-            build::build(&root, &project_dir, &resolved)?;
-            eprintln!("done in {:?}", t0.elapsed());
-        }
-        "test" | "verify" => {
-            let root = match root {
-                Some(r) => r,
-                None => loader.from_file(&args.pom_path)?,
-            };
-            if root.packaging != "jar" {
-                bail!("packaging '{}' is not supported yet (only jar)", root.packaging);
-            }
-            let main_classes = build::compile_main(&root, &project_dir, &resolved)?;
-            let test_classes = verify::compile_tests(&root, &project_dir, &main_classes, &resolved)?;
-            let cx = verify::TestRun {
-                root: &root,
-                dir: &project_dir,
-                main_classes: &main_classes,
-                test_classes: &test_classes,
-                resolved: &resolved,
-                repos: &repos,
-                settings: &config.test,
-                rerun: args.rerun,
-                cache_flag: args.test_cache.as_deref(),
-            };
-            verify::run(verify::Phase::Unit, &cx)?;
-            if args.cmd == "verify" {
-                build::package(&root, &project_dir, &main_classes, &resolved)?;
-                verify::run(verify::Phase::Integration, &cx)?;
-            }
-            eprintln!("done in {:?}", t0.elapsed());
-        }
-        _ => unreachable!(),
+    let found = reactor::scan(&args.pom_path)?;
+    let declared: Vec<_> = found.iter().flat_map(|f| f.poms.repos.iter().cloned()).collect();
+    let repos = repos::Repos::new(&declared, &settings, &config, args.refresh, args.cold)?;
+    let mut loader = model::Loader::new(&repos);
+    let modules = reactor::load(found, &loader)?;
+    for m in &modules {
+        loader.register_local(m.effective.clone(), &m.dir);
     }
+    let edges = reactor::dependency_edges(&modules);
+    let selected: Vec<usize> = pick(&args, &modules)?;
+    let many = selected.len() > 1;
+    if many && args.cmd == "classpath" {
+        bail!("`classpath` prints one line; choose a module with -m ({})", selected.iter().map(|&i| modules[i].name()).collect::<Vec<_>>().join(", "));
+    }
+    eprintln!(
+        "rvn {}: {} ({} repositories, {} routes{})",
+        args.cmd,
+        args.pom_path.display(),
+        repos.remote_count(),
+        repos.route_count(),
+        if many { format!(", {} modules", selected.len()) } else { String::new() }
+    );
+    let test_providers = reactor::test_class_providers(&modules, &selected);
+    let services = Services { repos: &repos, config: &config };
+    for &i in &selected {
+        let module = &modules[i];
+        if many {
+            eprintln!("==> {}", module.name());
+        }
+        let lock_hash = lock::fingerprint(&reactor::lock_inputs(&modules, &edges, i))?;
+        let resolved = dependencies(&args, module, &lock_hash, &repos, &loader)?;
+        let direct = resolved.iter().filter(|r| r.depth == 1).count();
+        eprintln!("  {} artifacts ({direct} direct): {}", resolved.len(), repos.summary());
+        run_module(&args, module, &resolved, test_providers.contains(&i), &services)?;
+    }
+    eprintln!("done in {:?}", t0.elapsed());
     if let Some(d) = cold_dir {
         let _ = std::fs::remove_dir_all(d);
     }
@@ -248,6 +287,14 @@ mod tests {
         assert_eq!(parse(&["test", "--test-cache", "/ci"]).unwrap().unwrap().test_cache.as_deref(), Some("/ci"));
         assert_eq!(parse(&["test"]).unwrap().unwrap().test_cache, None);
         assert!(parse(&["test", "--test-cache"]).is_err());
+    }
+
+    #[test]
+    fn module_flag_takes_a_name() {
+        assert_eq!(parse(&["test", "-m", "core"]).unwrap().unwrap().module.as_deref(), Some("core"));
+        assert_eq!(parse(&["test", "--module", "core"]).unwrap().unwrap().module.as_deref(), Some("core"));
+        assert_eq!(parse(&["test"]).unwrap().unwrap().module, None);
+        assert!(parse(&["test", "-m"]).is_err());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::pom::{self, Dep, Gav, ParentRef, RawPom, RepoDecl};
 use crate::repos::Repos;
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// A POM with parent inheritance, property interpolation and BOM imports applied: what Maven calls the
@@ -38,14 +38,69 @@ pub struct Effective {
     pub failsafe: Option<pom::TestCfg>,
 }
 
+/// A module of the current workspace: its model and where its build output goes.
+#[derive(Debug, Clone)]
+pub struct LocalModule {
+    pub effective: Arc<Effective>,
+    /// `target/classes`: stands in for the module's jar.
+    pub classes: PathBuf,
+    /// `target/test-classes`: stands in for its `test-jar`.
+    pub test_classes: PathBuf,
+}
+
+/// The modules of a reactor build, found by exact `groupId:artifactId:version`. A dependency on one of them is
+/// satisfied by its build output instead of a repository download, as in Maven's
+/// [reactor](https://maven.apache.org/guides/mini/guide-multiple-modules.html).
+#[derive(Debug, Default)]
+pub struct LocalModules {
+    modules: HashMap<Gav, LocalModule>,
+}
+
+impl LocalModules {
+    pub fn register(&mut self, effective: Effective, dir: &Path) {
+        let gav = effective.gav.clone();
+        let module = LocalModule { effective: Arc::new(effective), classes: dir.join("target/classes"), test_classes: dir.join("target/test-classes") };
+        self.modules.insert(gav, module);
+    }
+
+    pub fn get(&self, gav: &Gav) -> Option<&LocalModule> {
+        self.modules.get(gav)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty()
+    }
+
+    /// The directory that stands in for the artifact: the classes for the plain jar, the test classes for the
+    /// `tests` classifier. `None` for the module's other classifiers, and for artifacts that are not modules.
+    pub fn output(&self, gav: &Gav, classifier: Option<&str>, typ: &str) -> Option<PathBuf> {
+        let m = self.modules.get(gav)?;
+        match (classifier, typ) {
+            (Some("tests"), _) => Some(m.test_classes.clone()),
+            (None, "jar" | "bundle") => Some(m.classes.clone()),
+            _ => None,
+        }
+    }
+}
+
 pub struct Loader<'a> {
     repos: &'a Repos,
     cache: Mutex<HashMap<Gav, Arc<Effective>>>,
+    locals: LocalModules,
 }
 
 impl<'a> Loader<'a> {
     pub fn new(repos: &'a Repos) -> Self {
-        Loader { repos, cache: Mutex::new(HashMap::new()) }
+        Loader { repos, cache: Mutex::new(HashMap::new()), locals: LocalModules::default() }
+    }
+
+    /// Makes `effective` (built in `dir`) resolvable as a workspace module; do this before resolving.
+    pub fn register_local(&mut self, effective: Effective, dir: &Path) {
+        self.locals.register(effective, dir);
+    }
+
+    pub fn locals(&self) -> &LocalModules {
+        &self.locals
     }
 
     pub fn from_file(&self, path: &Path) -> Result<Effective> {
@@ -59,6 +114,9 @@ impl<'a> Loader<'a> {
     }
 
     fn load_depth(&self, gav: &Gav, depth: usize) -> Result<Arc<Effective>> {
+        if let Some(m) = self.locals.get(gav) {
+            return Ok(m.effective.clone());
+        }
         if let Some(e) = self.cache.lock().unwrap().get(gav) {
             return Ok(e.clone());
         }
@@ -248,16 +306,35 @@ fn local_parent_path(p: &ParentRef, dir: &Path) -> Option<std::path::PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// `<repositories>` of a POM and its on-disk parents, nearest first (needed before any repo can be queried).
-pub fn local_repos(pom_path: &Path) -> Result<Vec<RepoDecl>> {
+/// `pom_path` and the parent POMs found on disk above it, nearest first, each parsed.
+fn local_chain(pom_path: &Path) -> Result<Vec<(PathBuf, RawPom)>> {
     let mut out = vec![];
     let mut cur = pom_path.to_path_buf();
     for _ in 0..30 {
         let raw = pom::parse(&std::fs::read_to_string(&cur).with_context(|| format!("reading {}", cur.display()))?)
             .with_context(|| cur.display().to_string())?;
-        out.extend(raw.repos.iter().cloned());
-        let Some(next) = raw.parent.as_ref().and_then(|p| local_parent_path(p, cur.parent().unwrap_or(Path::new(".")))) else { break };
+        let next = raw.parent.as_ref().and_then(|p| local_parent_path(p, cur.parent().unwrap_or(Path::new("."))));
+        out.push((cur, raw));
+        let Some(next) = next else { break };
         cur = next;
+    }
+    Ok(out)
+}
+
+/// A POM and the parents found above it on disk, read without touching the network.
+#[derive(Debug, Default, Clone)]
+pub struct LocalPoms {
+    /// The POM itself, then its parents, nearest first: everything whose change can change the model.
+    pub files: Vec<PathBuf>,
+    /// `<repositories>` of those files, nearest first (needed before any repo can be queried).
+    pub repos: Vec<RepoDecl>,
+}
+
+pub fn local_poms(pom_path: &Path) -> Result<LocalPoms> {
+    let mut out = LocalPoms::default();
+    for (path, raw) in local_chain(pom_path)? {
+        out.files.push(path);
+        out.repos.extend(raw.repos);
     }
     Ok(out)
 }
@@ -322,6 +399,32 @@ mod tests {
         let deps = merge_dependencies(own, Some(&parent()), &managed, &props);
         let got: Vec<_> = deps.iter().map(|d| (d.artifact.as_str(), d.version.as_deref())).collect();
         assert_eq!(got, [("a", Some("managed")), ("shared", Some("9")), ("inherited", Some("1"))]);
+    }
+
+    #[test]
+    fn local_modules_stand_in_for_the_jar_and_the_test_jar_only() {
+        let mut locals = LocalModules::default();
+        assert!(locals.is_empty());
+        locals.register(effective(Gav::new("g", "lib", "1"), &[], vec![]), Path::new("/w/lib"));
+        let gav = Gav::new("g", "lib", "1");
+        assert_eq!(locals.output(&gav, None, "jar"), Some(PathBuf::from("/w/lib/target/classes")));
+        assert_eq!(locals.output(&gav, Some("tests"), "test-jar"), Some(PathBuf::from("/w/lib/target/test-classes")));
+        assert_eq!(locals.output(&gav, Some("sources"), "jar"), None);
+        assert_eq!(locals.output(&Gav::new("g", "lib", "2"), None, "jar"), None, "another version is not the module");
+        assert!(locals.get(&gav).is_some() && !locals.is_empty());
+    }
+
+    #[test]
+    fn local_poms_lists_the_pom_then_its_parents_on_disk() {
+        let d = std::env::temp_dir().join(format!("rvn-chain-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("child")).unwrap();
+        let pom = |parent: &str, name: &str| format!("<project>{parent}<groupId>g</groupId><artifactId>{name}</artifactId><version>1</version></project>");
+        std::fs::write(d.join("pom.xml"), pom("", "root")).unwrap();
+        let parent = "<parent><groupId>g</groupId><artifactId>root</artifactId><version>1</version></parent>";
+        std::fs::write(d.join("child/pom.xml"), pom(parent, "child")).unwrap();
+        assert_eq!(local_poms(&d.join("child/pom.xml")).unwrap().files, [d.join("child/pom.xml"), d.join("child/../pom.xml")]);
+        assert_eq!(local_poms(&d.join("pom.xml")).unwrap().files, [d.join("pom.xml")]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

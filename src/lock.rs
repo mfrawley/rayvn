@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 pub struct Lock {
@@ -42,6 +42,13 @@ pub struct Pkg {
     pub repo_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// A module of the same reactor build, resolved to its build output; no repository, no checksum.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub workspace: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Lower-case hex SHA-256, used for both the POM fingerprint and artifact checksums.
@@ -54,6 +61,16 @@ pub struct Pkg {
 /// ```
 pub fn hash_bytes(b: &[u8]) -> String {
     crate::repos::hex(&Sha256::digest(b))
+}
+
+/// One hash for a set of POM files (a module, its parents on disk, and the modules it depends on): it changes when
+/// any of their contents changes, and does not depend on where the checkout lives.
+pub fn fingerprint(files: &[std::path::PathBuf]) -> Result<String> {
+    let mut lines = vec![];
+    for f in files {
+        lines.push(hash_bytes(&std::fs::read(f).with_context(|| format!("reading {}", f.display()))?));
+    }
+    Ok(hash_bytes(lines.join("\n").as_bytes()))
 }
 
 /// The lock if it exists, parses, and matches the current pom; otherwise `None`.
@@ -97,6 +114,7 @@ pub fn write(path: &Path, pom_sha256: &str, resolved: &[Resolved], repos: &Repos
             repo_url: repo.as_deref().and_then(|id| repos.url_of(id)),
             repo,
             sha256: r.sha256.clone(),
+            workspace: r.workspace,
             }
         })
         .collect();
@@ -106,14 +124,19 @@ pub fn write(path: &Path, pom_sha256: &str, resolved: &[Resolved], repos: &Repos
 }
 
 /// Materialise the locked set: no POM parsing, no graph walk; missing jars come straight from their recorded repo.
-pub fn realize(lock: &Lock, repos: &Repos) -> Result<Vec<Resolved>> {
+pub fn realize(lock: &Lock, repos: &Repos, locals: &crate::model::LocalModules) -> Result<Vec<Resolved>> {
     let known: Vec<RepoDecl> = lock.package.iter().filter_map(|p| Some(RepoDecl { id: p.repo.clone()?, url: p.repo_url.clone()? })).collect();
     repos.add_repos(&known);
     lock.package
         .par_iter()
         .map(|p| {
+            let gav = Gav::new(&p.group, &p.artifact, &p.version);
             let jar = if p.typ == "pom" {
                 None
+            } else if p.workspace {
+                Some(locals.output(&gav, p.classifier.as_deref().or(if p.typ == "test-jar" { Some("tests") } else { None }), &p.typ).with_context(|| {
+                    format!("rayvn.lock names {gav} as a module of the build, but it is not one of the modules being built; run `rvn lock`")
+                })?)
             } else {
                 let ext = if matches!(p.typ.as_str(), "bundle" | "maven-plugin" | "test-jar") { "jar" } else { p.typ.as_str() };
                 let classifier = p.classifier.as_deref().or(if p.typ == "test-jar" { Some("tests") } else { None });
@@ -123,7 +146,7 @@ pub fn realize(lock: &Lock, repos: &Repos) -> Result<Vec<Resolved>> {
                 Some(loc.path)
             };
             Ok(Resolved {
-                gav: Gav::new(&p.group, &p.artifact, &p.version),
+                gav,
                 scope: p.scope.clone(),
                 classifier: p.classifier.clone(),
                 depth: p.depth,
@@ -132,6 +155,7 @@ pub fn realize(lock: &Lock, repos: &Repos) -> Result<Vec<Resolved>> {
                 typ: p.typ.clone(),
                 repo: p.repo.clone(),
                 sha256: p.sha256.clone(),
+                workspace: p.workspace,
             })
         })
         .collect()
@@ -175,11 +199,29 @@ mod tests {
             typ: "jar".into(),
             repo: repo.map(String::from),
             sha256: None,
+            workspace: false,
         }
     }
 
     fn known(repo: &str) -> HashMap<String, String> {
         HashMap::from([(coordinates("g", "a", "1", None), repo.to_string())])
+    }
+
+    #[test]
+    fn the_fingerprint_follows_content_not_location() {
+        let d = std::env::temp_dir().join(format!("rvn-fp-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("x")).unwrap();
+        let (a, b) = (d.join("a.xml"), d.join("x/b.xml"));
+        std::fs::write(&a, "one").unwrap();
+        std::fs::write(&b, "two").unwrap();
+        let before = fingerprint(&[a.clone(), b.clone()]).unwrap();
+        std::fs::copy(&b, d.join("copy.xml")).unwrap();
+        assert_eq!(fingerprint(&[a.clone(), d.join("copy.xml")]).unwrap(), before, "a moved file with the same content");
+        std::fs::write(&b, "changed").unwrap();
+        assert_ne!(fingerprint(&[a.clone(), b]).unwrap(), before);
+        assert_ne!(fingerprint(&[a]).unwrap(), before, "a file missing from the set");
+        assert!(fingerprint(&[d.join("missing.xml")]).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -198,7 +240,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rvn-lock-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("rayvn.lock");
-        let text = "version = 3\npom_sha256 = \"stale\"\n\n[[package]]\ngroup = \"g\"\nartifact = \"a\"\nversion = \"1\"\nclassifier = \"tests\"\ntype = \"jar\"\nscope = \"test\"\ndepth = 1\nrepo = \"r\"\n";
+        let text = "version = 4\npom_sha256 = \"stale\"\n\n[[package]]\ngroup = \"g\"\nartifact = \"a\"\nversion = \"1\"\nclassifier = \"tests\"\ntype = \"jar\"\nscope = \"test\"\ndepth = 1\nrepo = \"r\"\n";
         std::fs::write(&path, text).unwrap();
         let prev = previous_repos(&path);
         assert_eq!(prev.get(&coordinates("g", "a", "1", Some("tests"))).map(String::as_str), Some("r"));

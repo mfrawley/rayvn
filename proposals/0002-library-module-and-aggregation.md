@@ -64,6 +64,43 @@ rayvn does not run Maven plugins (no JVM plugin host, no Mojo API). It reads a p
 
 One `rayvn.lock` per module, as now; no root lockfile until we need one.
 
+### Results (2026-10-21)
+
+Steps 1 to 3 are done (`src/reactor.rs`, `docs/workspace.md`); step 4 is not: modules build one after another. A sibling is matched on exact coordinates and read from `target/classes`; the lock records it as `workspace = true`. Checked on a two-module demo, including `fetch`, `--locked` and a shaded app containing its sibling, and on matsim-moia (single module, unchanged).
+
+### Versions across modules
+
+Per-module resolution means modules may differ; they conflict only where both reach one classpath, and the JVM's flat namespace allows one version there. Planned, opt-in:
+
+```toml
+[workspace]
+versions = "per-module"   # default
+# "check":   fail if modules resolve different versions of an artifact
+# "unified": highest wins, every module re-resolved with it imposed
+allow = ["org.matsim:matsim"]
+```
+
+`check` first. Gradle: one version per configuration by default, `failOnVersionConflict()`, platforms for alignment. Bazel: one version per artifact is the rule (`maven_install` per repo to opt out). uv: one lock for the workspace, resolved together. Nix: separate store paths, which does not help on a single classpath.
+
+### Bumping a dependency across modules (0-day response)
+
+Goal: one command that raises a library everywhere it is declared, for a person or a bot, with a result that can be reviewed and merged.
+
+```sh
+rvn bump org.apache.logging.log4j:log4j-core 2.17.1 [--dry-run] [--json] [--only-direct]
+```
+
+Design, not built:
+
+1. **Find** every place a module's version comes from, per module: a literal `<version>`, a `${property}` (change the property, once), a `<dependencyManagement>` entry (change that), an imported BOM (cannot be bumped; say so and suggest an override entry). Transitive-only use is reported, and handled by adding a managed entry only with `--pin-transitive`.
+2. **Edit in place**, touching only the version text (comments and layout kept), never rewriting the XML.
+3. **Re-lock** each changed module and every module that depends on one (the sibling graph is known), so the diff is POMs plus `rayvn.lock`.
+4. **Report**: human table by default; `--json` lists module, file, kind of edit (literal, property, managed) and old and new version. Exit codes: 0 changed, 3 nothing to change, 1 error; `--dry-run` writes nothing and uses the same codes.
+5. **Verify**: with `--test`, run the affected modules' tests (the test cache keeps this cheap).
+6. Later: `rvn audit` to list locked artifacts against an advisory feed, so the bump can be driven by it (`--from-advisory GHSA-...`), and a minimum-age option for the target version.
+
+Gradle: a version catalog or platform holds the version once; Renovate or Dependabot edit it, and `dependencyInsight` shows who pulls a library. Bazel: versions live in `maven_install` / `MODULE.bazel`, and `bazel run @maven//:pin` regenerates the lock. Maven: `versions:use-dep-version`, `versions:set-property`, `versions:update-properties` edit POMs, but do not know about lock files or which modules are affected. rayvn's edge is that the module graph and the lock are already known, so one command can do edit, re-lock and report.
+
 ### How Gradle and Bazel handle it (from memory, unchecked)
 
 - **Gradle** lists projects in `settings.gradle` and builds a task graph over all of them: `:core:jar` before `:app:compileJava`. Independent tasks run in parallel; up-to-date tasks are skipped. A sibling is a `project(":core")` dependency.

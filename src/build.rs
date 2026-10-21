@@ -63,7 +63,7 @@ pub fn package(root: &Effective, dir: &Path, classes: &Path, resolved: &[Resolve
         if result == jar_path {
             shade_in_place(cfg, &target, &jar_path, resolved, root)?;
         } else {
-            shade_into(cfg, &jar_path, &result, resolved)?;
+            shade_into(cfg, &jar_path, &result, resolved, &target)?;
         }
     }
     println!("{}", result.display());
@@ -177,25 +177,35 @@ fn deflated() -> SimpleFileOptions {
 fn shade_in_place(cfg: &ShadeCfg, target: &Path, jar_path: &Path, resolved: &[Resolved], root: &Effective) -> Result<()> {
     let original = target.join(format!("original-{}-{}.jar", root.gav.artifact, root.gav.version));
     std::fs::rename(jar_path, &original)?;
-    shade_into(cfg, &original, jar_path, resolved)
+    shade_into(cfg, &original, jar_path, resolved, target)
 }
 
-fn shade_into(cfg: &ShadeCfg, plain: &Path, out: &Path, resolved: &[Resolved]) -> Result<()> {
+fn shade_into(cfg: &ShadeCfg, plain: &Path, out: &Path, resolved: &[Resolved], target: &Path) -> Result<()> {
     for i in &cfg.ignored {
         eprintln!("  warning: shade option not supported by rayvn, ignored: {i}");
     }
-    let n = shade(cfg, plain, &shaded_dependencies(resolved), out)?;
+    let n = shade(cfg, plain, &shaded_dependencies(resolved, target)?, out)?;
     eprintln!("  shaded {} dependency jars into {} ({})", n, out.display(), size(out));
     Ok(())
 }
 
-/// `group:artifact` and jar of every compile/runtime dependency, in resolution order.
-fn shaded_dependencies(resolved: &[Resolved]) -> Vec<(String, PathBuf)> {
-    resolved
-        .iter()
-        .filter(|r| matches!(r.scope.as_str(), "compile" | "runtime"))
-        .filter_map(|r| Some((format!("{}:{}", r.gav.group, r.gav.artifact), r.jar.clone()?)))
-        .collect()
+/// `group:artifact` and jar of every compile/runtime dependency, in resolution order. A module of the same build
+/// is a class directory; it is packed into `target/rayvn-modules/` first so that it merges like any other jar.
+fn shaded_dependencies(resolved: &[Resolved], target: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut out = vec![];
+    for r in resolved.iter().filter(|r| matches!(r.scope.as_str(), "compile" | "runtime")) {
+        let Some(path) = r.jar.clone() else { continue };
+        let jar = if path.is_dir() {
+            let packed = target.join("rayvn-modules").join(format!("{}-{}.jar", r.gav.artifact, r.gav.version));
+            std::fs::create_dir_all(packed.parent().context("no parent")?)?;
+            write_jar(&path, &packed)?;
+            packed
+        } else {
+            path
+        };
+        out.push((format!("{}:{}", r.gav.group, r.gav.artifact), jar));
+    }
+    Ok(out)
 }
 
 fn size(p: &Path) -> String {

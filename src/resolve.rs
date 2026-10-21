@@ -1,7 +1,7 @@
 //! Dependency resolution: breadth-first over the graph, Maven's "nearest wins" version mediation, scope
 //! mediation, exclusions and optional dependencies. POMs at each depth are loaded in parallel.
 
-use crate::model::{Effective, Loader};
+use crate::model::{Effective, Loader, LocalModules};
 use crate::pom::{Dep, Gav};
 use crate::repos::{Located, Repos};
 use anyhow::Result;
@@ -29,6 +29,9 @@ pub struct Resolved {
     /// Name of the repository the file came from (for the lockfile).
     pub repo: Option<String>,
     pub sha256: Option<String>,
+    /// Satisfied by a module of the same reactor build: `jar` is that module's classes directory, and there is
+    /// nothing to download or checksum.
+    pub workspace: bool,
 }
 
 #[derive(Clone)]
@@ -185,6 +188,7 @@ pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: b
 
     // Jar downloads start as soon as a node is chosen, overlapping the POM walk; results are kept so the pass below reports failures and the origin repo.
     let fetched: Fetched = Mutex::new(HashMap::new());
+    let locals = loader.locals();
     rayon::scope(|scope| -> Result<()> {
         while !frontier.is_empty() {
             let expanded: Vec<Result<Vec<Node>>> = frontier
@@ -198,7 +202,7 @@ pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: b
                     if tree.admit(&k) {
                         let (fetched, kc) = (&fetched, k.clone());
                         scope.spawn(move |_| {
-                            let r = fetch_jar(repos, &kc);
+                            let r = fetch_jar(repos, locals, &kc);
                             fetched.lock().unwrap().insert(kc.dep.key(), r);
                         });
                         next.push(k);
@@ -217,18 +221,18 @@ pub fn resolve(root: &Effective, loader: &Loader, repos: &Repos, include_test: b
         .map(|k| {
             let n = &tree.chosen[k];
             let done = fetched.lock().unwrap().remove(k);
-            to_resolved(n, locate(repos, n, done)?)
+            to_resolved(n, locate(repos, locals, n, done)?, locals.get(&Gav::new(&n.dep.group, &n.dep.artifact, &n.version)).is_some())
         })
         .collect();
     unique_artifacts(results)
 }
 
 /// The jar of `n`: the prefetched result if there is one, else fetched now. POM-only dependencies have none.
-fn locate(repos: &Repos, n: &Node, prefetched: Option<Result<Option<Located>>>) -> Result<Option<Located>> {
+fn locate(repos: &Repos, locals: &LocalModules, n: &Node, prefetched: Option<Result<Option<Located>>>) -> Result<Option<Located>> {
     if n.dep.typ == "pom" {
         return Ok(None);
     }
-    match prefetched.unwrap_or_else(|| fetch_jar(repos, n))? {
+    match prefetched.unwrap_or_else(|| fetch_jar(repos, locals, n))? {
         Some(l) => Ok(Some(l)),
         None => anyhow::bail!("artifact not found in any repository: {}", Gav::new(&n.dep.group, &n.dep.artifact, &n.version)),
     }
@@ -240,8 +244,8 @@ fn classifier_of(d: &Dep) -> Option<&str> {
     d.classifier.as_deref().or(if d.typ == "test-jar" { Some("tests") } else { None })
 }
 
-fn to_resolved(n: &Node, loc: Option<Located>) -> Result<Resolved> {
-    let sha256 = loc.as_ref().map(|l| crate::repos::sha256_file(&l.path)).transpose()?;
+fn to_resolved(n: &Node, loc: Option<Located>, workspace: bool) -> Result<Resolved> {
+    let sha256 = if workspace { None } else { loc.as_ref().map(|l| crate::repos::sha256_file(&l.path)).transpose()? };
     Ok(Resolved {
         gav: Gav::new(&n.dep.group, &n.dep.artifact, &n.version),
         scope: n.scope.clone(),
@@ -252,6 +256,7 @@ fn to_resolved(n: &Node, loc: Option<Located>) -> Result<Resolved> {
         jar: loc.map(|l| l.path),
         typ: n.dep.typ.clone(),
         sha256,
+        workspace,
     })
 }
 
@@ -268,9 +273,17 @@ fn unique_artifacts(results: Vec<Result<Resolved>>) -> Result<Vec<Resolved>> {
     Ok(out)
 }
 
-fn fetch_jar(repos: &Repos, n: &Node) -> Result<Option<Located>> {
+/// A workspace module's build output when `n` is one; otherwise the artifact from a repository.
+fn fetch_jar(repos: &Repos, locals: &LocalModules, n: &Node) -> Result<Option<Located>> {
     if n.dep.typ == "pom" {
         return Ok(None);
+    }
+    let gav = Gav::new(&n.dep.group, &n.dep.artifact, &n.version);
+    if let Some(dir) = locals.output(&gav, classifier_of(&n.dep), &n.dep.typ) {
+        return Ok(Some(Located { path: dir, downloaded: false, repo: None }));
+    }
+    if locals.get(&gav).is_some() {
+        anyhow::bail!("{gav} is a module of this build, but the build does not produce its {} artifact", classifier_of(&n.dep).unwrap_or(&n.dep.typ));
     }
     let typ = n.dep.typ.as_str();
     let ext = if matches!(typ, "bundle" | "maven-plugin" | "test-jar") { "jar" } else { typ };

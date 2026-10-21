@@ -9,12 +9,14 @@
 //!    credentials, routes, hints).
 //! 2. [`pom`] and [`model`]: parse `pom.xml`, then build the effective model (parents, BOM imports,
 //!    properties, dependency management).
-//! 3. [`resolve`]: walk the dependency graph with Maven's mediation rules, fetching POMs through [`repos`].
-//! 4. [`repos`]: ask repositories (routed, hinted, cached, with a miss cache) and keep the local cache;
+//! 3. [`reactor`]: for a POM with `<modules>`, find the modules, order them by their dependencies on each other and
+//!    resolve a sibling to its build output; each module is then locked and built on its own.
+//! 4. [`resolve`]: walk the dependency graph with Maven's mediation rules, fetching POMs through [`repos`].
+//! 5. [`repos`]: ask repositories (routed, hinted, cached, with a miss cache) and keep the local cache;
 //!    bookkeeping lives in one file, see [`index`].
-//! 5. [`lock`]: write or read `rayvn.lock`, which pins versions, repositories and checksums.
-//! 6. [`build`]: compile with `javac` and package the jar (shaded when the POM asks for it).
-//! 7. [`verify`] and [`testcache`]: compile the tests and run them with JUnit, selected as surefire and failsafe
+//! 6. [`lock`]: write or read `rayvn.lock`, which pins versions, repositories and checksums.
+//! 7. [`build`]: compile with `javac` and package the jar (shaded when the POM asks for it).
+//! 8. [`verify`] and [`testcache`]: compile the tests and run them with JUnit, selected as surefire and failsafe
 //!    would, sharded across JVMs and skipped when nothing they depend on has changed.
 //!
 //! Credentials never appear in these types as plain config values; [`secret`] resolves them from the
@@ -25,6 +27,7 @@ pub mod index;
 pub mod lock;
 pub mod model;
 pub mod pom;
+pub mod reactor;
 pub mod repos;
 pub mod resolve;
 pub mod secret;

@@ -131,16 +131,28 @@ pub fn plan(phase: Phase, cfg: &TestCfg, root: &Effective, sources: &[String], s
     Selection::Run(Plan { classes, jvm_args, use_cache: cacheable && !rerun, shards: settings.shards.unwrap_or(1).max(1) })
 }
 
-/// `(coordinates, sha256)` of every resolved jar; a jar without a checksum is identified by its path.
-fn jar_inputs(resolved: &[Resolved]) -> Vec<(String, String)> {
+/// `(coordinates, sha256)` of every resolved jar. A workspace module is identified by the hash of its class tree,
+/// a jar without a checksum by its path.
+fn jar_inputs(resolved: &[Resolved]) -> Result<Vec<(String, String)>> {
     resolved
         .iter()
-        .filter(|r| r.jar.is_some())
-        .map(|r| {
+        .filter_map(|r| Some((r, r.jar.as_ref()?)))
+        .map(|(r, jar)| {
             let coords = format!("{}:{}", r.gav, r.classifier.as_deref().unwrap_or(""));
-            (coords, r.sha256.clone().unwrap_or_else(|| r.jar.as_ref().map(|p| p.display().to_string()).unwrap_or_default()))
+            let id = match (&r.sha256, r.workspace) {
+                (Some(h), _) => h.clone(),
+                (None, true) => tree_hash(jar)?,
+                (None, false) => jar.display().to_string(),
+            };
+            Ok((coords, id))
         })
         .collect()
+}
+
+/// One hash for everything below `dir`, by relative path and content.
+fn tree_hash(dir: &Path) -> Result<String> {
+    let lines: Vec<String> = testcache::hash_tree(dir)?.into_iter().map(|(p, h)| format!("{p} {h}")).collect();
+    Ok(crate::lock::hash_bytes(lines.join("\n").as_bytes()))
 }
 
 fn prefixed(prefix: &str, files: Vec<(String, String)>) -> impl Iterator<Item = (String, String)> {
@@ -242,7 +254,7 @@ pub fn run(phase: Phase, cx: &TestRun) -> Result<bool> {
         jdk: jdk_version()?,
         jvm_args: plan.jvm_args.clone(),
         classes: plan.classes.clone(),
-        jars: jar_inputs(cx.resolved),
+        jars: jar_inputs(cx.resolved)?,
         files: prefixed("main", testcache::hash_tree(cx.main_classes)?)
             .chain(prefixed("test", testcache::hash_tree(cx.test_classes)?))
             .chain(prefixed("input", testcache::hash_declared(cx.dir, &cx.settings.inputs)?))
@@ -398,21 +410,39 @@ mod tests {
         assert_eq!(run_plan(sel).jvm_args, ["-Xmx2g", "-ea"]);
     }
 
-    #[test]
-    fn jar_inputs_use_checksums_and_fall_back_to_paths() {
-        let r = |sha: Option<&str>, jar: Option<&str>, classifier: Option<&str>| Resolved {
+    fn resolved_jar(sha: Option<&str>, jar: Option<&Path>, classifier: Option<&str>, workspace: bool) -> Resolved {
+        Resolved {
             gav: crate::pom::Gav::new("g", "a", "1"),
             scope: "compile".into(),
             classifier: classifier.map(Into::into),
             depth: 1,
             via: None,
-            jar: jar.map(PathBuf::from),
+            jar: jar.map(Path::to_path_buf),
             typ: "jar".into(),
             repo: None,
             sha256: sha.map(Into::into),
-        };
-        let got = jar_inputs(&[r(Some("h"), Some("/x.jar"), None), r(None, Some("/y.jar"), Some("tests")), r(None, None, None)]);
+            workspace,
+        }
+    }
+
+    #[test]
+    fn jar_inputs_use_checksums_and_fall_back_to_paths() {
+        let r = |sha, jar, classifier| resolved_jar(sha, jar, classifier, false);
+        let got = jar_inputs(&[r(Some("h"), Some(Path::new("/x.jar")), None), r(None, Some(Path::new("/y.jar")), Some("tests")), r(None, None, None)]).unwrap();
         assert_eq!(got, [("g:a:1:".to_string(), "h".to_string()), ("g:a:1:tests".to_string(), "/y.jar".to_string())]);
+    }
+
+    #[test]
+    fn a_workspace_module_is_identified_by_its_class_tree() {
+        let d = std::env::temp_dir().join(format!("rvn-wsjar-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("A.class"), "one").unwrap();
+        let ws = [resolved_jar(None, Some(&d), None, true)];
+        let before = jar_inputs(&ws).unwrap();
+        assert_eq!(jar_inputs(&ws).unwrap(), before, "same classes, same identity");
+        std::fs::write(d.join("A.class"), "two").unwrap();
+        assert_ne!(jar_inputs(&ws).unwrap(), before, "changed classes, new identity");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -11,7 +11,7 @@ Compatibility is judged by results (same classpath, same jar contents), not by r
 ## Usage
 
 ```text
-rvn <command> [-f pom.xml] [--locked] [--refresh] [--cold]
+rvn <command> [-f pom.xml] [-m module] [--locked] [--refresh] [--cold]
 ```
 
 | Command | What it does |
@@ -27,6 +27,7 @@ rvn <command> [-f pom.xml] [--locked] [--refresh] [--cold]
 | Flag | Meaning |
 |---|---|
 | `-f <path>` | Use this POM instead of `./pom.xml`. The lockfile goes beside it. |
+| `-m <module>` | Multi-module: this module and what it depends on (only this one for `lock`, `fetch`, `resolve`, `classpath`). See `docs/workspace.md`. |
 | `--locked` | Fail if `rayvn.lock` is missing or stale, instead of resolving. |
 | `--refresh` | Ignore `rayvn.lock` and the miss cache for this run; the lock is rewritten. |
 | `--test-cache <dir>` | `test`/`verify`: store test results here (also `RAYVN_TEST_CACHE`, `[test] cache_dir`). |
@@ -55,5 +56,5 @@ Environment: `RAYVN_LOCAL_REPO` (cache location), `RAYVN_RO_REPO` (read-only cac
 ## Where things are
 
 - `proposals/`: design decisions, numbered, not rewritten after the fact.
-- `docs/`: user documentation (`routing.md`, `credentials.md`, `testing.md`).
+- `docs/`: user documentation (`routing.md`, `credentials.md`, `testing.md`, `workspace.md`).
 - API docs: `cargo doc --no-deps --open`. Examples in them run under `cargo test`.
