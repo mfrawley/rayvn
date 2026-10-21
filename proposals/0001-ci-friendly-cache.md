@@ -1,6 +1,6 @@
 # 0001: CI-friendly cache
 
-Status: implemented (all four steps), 2026-10-20
+Status: implemented (all four steps), 2026-10-20. Open: the content-addressed store (below). Related, later: the test result cache and its CI location (`docs/testing.md`), and the `--cold` run's cache flag, which is still only `RAYVN_LOCAL_REPO`.
 Date: 2026-10-20
 
 `proposals/` records design changes before or as they are made: what we chose, why, and what we left out. Number them in order; don't rewrite history, supersede with a new proposal.

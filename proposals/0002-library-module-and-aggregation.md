@@ -1,6 +1,11 @@
 # 0002: Building a full-toolchain library module, then `<modules>` aggregation
 
-Status: proposed, 2026-10-21
+Status: partly implemented, 2026-10-21
+
+- Part 1, steps 1 to 4 (run it, `rvn test`, `rvn verify`, shade parity): implemented, with a test result cache and sharding (`docs/testing.md`).
+- Part 1, step 5 (convergence check): open. It will apply only where the POM binds the enforcer's `enforce` goal in an `<execution>`.
+- Part 2, steps 1 to 3 (`<modules>`, ordering, sibling resolution): implemented (`docs/workspace.md`). Step 4 (parallel module builds): open.
+- Not started: `[workspace] versions` (see below). The bump design moved to `0003-bump.md`.
 
 Purpose of the project: see `README.md` (Maven-compatible, modernised). Every item below says how Maven, Gradle and Bazel handle it, and what rayvn takes.
 
@@ -31,7 +36,7 @@ What its POM uses, and the gap in rayvn today:
 2. **`rvn test`.** Compile `src/test/java` (+ `src/test/resources`) against the test classpath, run JUnit through the JUnit Platform Console Launcher, honour surefire `includes`/`excludes` and `skipTests`. Works on the plain classpath (`useModulePath=false`). No forking per class by default.
 3. **`rvn verify`** (integration tests): same, with failsafe's patterns, honouring `skipITs`. Runs after `package`, as in Maven.
 4. **Shade parity.** Honour `finalName` and `shadedArtifactAttached`/`shadedClassifierName` so the output file names match Maven's.
-5. **Convergence check.** Report `dependencyConvergence` violations from the resolved graph, as a warning or an error when the POM enforces it. Needs no plugin code.
+5. **Convergence check (open).** Report `dependencyConvergence` violations from the resolved graph, as a warning or an error when the POM enforces it. Needs no plugin code.
 
 ### Results of running it (2026-10-21)
 
@@ -60,7 +65,7 @@ rayvn does not run Maven plugins (no JVM plugin host, no Mojo API). It reads a p
 1. Follow `<modules>` recursively from a `pom`-packaging root; accept `pom` packaging for aggregators (build nothing, only recurse).
 2. Build children in an order consistent with their dependencies on each other.
 3. Resolve a sibling at the reactor version (`lib:1.0-SNAPSHOT`) from its build output, not from a repository.
-4. Build independent modules in parallel.
+4. Build independent modules in parallel (open).
 
 One `rayvn.lock` per module, as now; no root lockfile until we need one.
 
