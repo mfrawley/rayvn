@@ -40,10 +40,20 @@ pub(crate) fn walk_filtered(dir: &Path, skip: &dyn Fn(&Path) -> bool, out: &mut 
 /// Compiles `src/main/java` and copies `src/main/resources` into `target/classes`; returns that directory.
 pub fn compile_main(root: &Effective, dir: &Path, resolved: &[Resolved]) -> Result<PathBuf> {
     let classes = dir.join("target/classes");
-    std::fs::create_dir_all(&classes)?;
+    // javac recompiles everything, so a clean directory costs nothing and keeps deleted sources and resources out of the jar.
+    clean_dir(&classes)?;
     compile(root, &dir.join("src/main/java"), &classes, &compile_classpath(resolved))?;
     copy_resources(&dir.join("src/main/resources"), &classes)?;
     Ok(classes)
+}
+
+/// Empties `dir` (creating it if needed).
+pub(crate) fn clean_dir(dir: &Path) -> Result<()> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).with_context(|| format!("cleaning {}", dir.display()))?;
+    }
+    std::fs::create_dir_all(dir)?;
+    Ok(())
 }
 
 pub fn build(root: &Effective, dir: &Path, resolved: &[Resolved]) -> Result<()> {
@@ -211,8 +221,13 @@ fn entry_name(root: &Path, file: &Path) -> Result<String> {
     Ok(file.strip_prefix(root)?.to_string_lossy().replace('\\', "/"))
 }
 
+/// Entry options for reproducible jars: a fixed timestamp (the zip epoch, 1980-01-01) and fixed permissions, so the
+/// same inputs give the same bytes whenever and wherever they are built.
 fn deflated() -> SimpleFileOptions {
-    SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+    SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip::DateTime::default())
+        .unix_permissions(0o644)
 }
 
 /// Replaces `jar_path` with a shaded jar; the plain jar is kept as `original-<name>`.
@@ -366,7 +381,7 @@ fn copy_entries<R: std::io::Read + std::io::Seek, W: Write + std::io::Seek>(
             continue;
         }
         seen.insert(name);
-        zip.raw_copy_file(archive.by_index_raw(i)?)?;
+        zip.raw_copy_file_touch(archive.by_index_raw(i)?, zip::DateTime::default(), Some(0o644))?;
     }
     Ok(())
 }
@@ -432,6 +447,43 @@ mod tests {
         assert!(skip_entry(&cfg, "org.eclipse.emf:common", "META-INF/ECLIPSE_.SF", &none));
         assert!(skip_entry(&cfg, "org.eclipse.emf:common", "META-INF/ECLIPSE_.RSA", &none));
         assert!(!skip_entry(&cfg, "org.eclipse.emf:common", "META-INF/services/x", &none));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rayvn-build-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn clean_dir_removes_stale_files_and_creates_missing_directories() {
+        let d = scratch("clean");
+        std::fs::create_dir_all(d.join("a/b")).unwrap();
+        std::fs::write(d.join("a/b/old.class"), b"x").unwrap();
+        clean_dir(&d).unwrap();
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
+        clean_dir(&d.join("new/deep")).unwrap();
+        assert!(d.join("new/deep").is_dir());
+    }
+
+    #[test]
+    fn jars_are_reproducible_fixed_time_fixed_permissions_sorted_entries() {
+        let d = scratch("jar");
+        let classes = d.join("classes");
+        std::fs::create_dir_all(classes.join("z")).unwrap();
+        std::fs::write(classes.join("z/B.class"), b"b").unwrap();
+        std::fs::write(classes.join("A.class"), b"a").unwrap();
+        write_jar(&classes, &d.join("1.jar")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        write_jar(&classes, &d.join("2.jar")).unwrap();
+        assert_eq!(std::fs::read(d.join("1.jar")).unwrap(), std::fs::read(d.join("2.jar")).unwrap());
+        let mut z = zip::ZipArchive::new(File::open(d.join("1.jar")).unwrap()).unwrap();
+        let names: Vec<_> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().unwrap().to_string()).collect();
+        assert_eq!(names, [MANIFEST, "A.class", "z/B.class"]);
+        let e = z.by_index(1).unwrap();
+        assert_eq!(e.last_modified(), Some(zip::DateTime::default()));
+        assert_eq!(e.unix_mode().map(|m| m & 0o777), Some(0o644));
     }
 
     #[test]
