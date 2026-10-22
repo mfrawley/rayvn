@@ -306,7 +306,16 @@ fn pump(reader: impl std::io::BufRead, prefix: &str, out: &mut impl Write) -> Re
 
 /// Runs `cmd`, streaming its output behind `prefix` (stdout to stdout, stderr to stderr), and reports success and the
 /// launcher's summary.
-fn run_command(mut cmd: Command, prefix: &str) -> Result<Outcome> {
+fn run_command(cmd: Command, prefix: &str) -> Result<Outcome> {
+    run_command_writers(cmd, prefix, &mut std::io::stdout(), &mut std::io::stderr())
+}
+
+fn run_command_writers(
+    mut cmd: Command,
+    prefix: &str,
+    stdout_writer: &mut impl Write,
+    stderr_writer: &mut (impl Write + Send),
+) -> Result<Outcome> {
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -315,18 +324,8 @@ fn run_command(mut cmd: Command, prefix: &str) -> Result<Outcome> {
     let stdout = child.stdout.take().context("no stdout from java")?;
     let stderr = child.stderr.take().context("no stderr from java")?;
     let output = std::thread::scope(|scope| -> Result<String> {
-        let errors = scope.spawn(|| {
-            pump(
-                std::io::BufReader::new(stderr),
-                prefix,
-                &mut std::io::stderr(),
-            )
-        });
-        let output = pump(
-            std::io::BufReader::new(stdout),
-            prefix,
-            &mut std::io::stdout(),
-        )?;
+        let errors = scope.spawn(|| pump(std::io::BufReader::new(stderr), prefix, stderr_writer));
+        let output = pump(std::io::BufReader::new(stdout), prefix, stdout_writer)?;
         errors
             .join()
             .map_err(|_| anyhow::anyhow!("reading the test JVM's stderr panicked"))??;
@@ -906,7 +905,7 @@ mod tests {
             "echo '[ 2 tests found ]'; echo '[ 2 tests successful ]'; echo '[ 0 tests failed ]'",
         ]);
         assert_eq!(
-            run_command(ok, "").unwrap(),
+            run_command_writers(ok, "", &mut std::io::sink(), &mut std::io::sink()).unwrap(),
             Outcome {
                 success: true,
                 summary: Some(testcache::Summary {
@@ -919,7 +918,7 @@ mod tests {
         let mut bad = Command::new("sh");
         bad.args(["-c", "exit 3"]);
         assert_eq!(
-            run_command(bad, "").unwrap(),
+            run_command_writers(bad, "", &mut std::io::sink(), &mut std::io::sink()).unwrap(),
             Outcome {
                 success: false,
                 summary: None
@@ -934,7 +933,7 @@ mod tests {
             "-c",
             "yes 'a line of stderr that is long enough to fill the pipe quickly, well past the 64 KB a pipe holds' | head -n 2000 >&2; echo '[ 1 tests found ]'; echo '[ 1 tests successful ]'; echo '[ 0 tests failed ]'",
         ]);
-        let o = run_command(noisy, "").unwrap();
+        let o = run_command_writers(noisy, "", &mut std::io::sink(), &mut std::io::sink()).unwrap();
         assert!(o.success, "a full stderr pipe must not stall the JVM");
         assert_eq!(o.summary.map(|s| s.successful), Some(1));
     }
