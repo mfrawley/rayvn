@@ -126,7 +126,11 @@ cargo check --quiet
 # Git commit
 echo "==> Creating release commit..."
 git add Cargo.toml Cargo.lock
-git commit -m "release: v$NEW_VERSION"
+if ! git diff --staged --quiet; then
+    git commit -m "release: v$NEW_VERSION"
+else
+    echo "No changes to Cargo.toml/Cargo.lock (version is already v$NEW_VERSION)."
+fi
 
 echo ""
 if [ "$PUBLISH" -eq 1 ]; then
