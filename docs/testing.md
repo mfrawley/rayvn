@@ -25,6 +25,10 @@ Only JUnit 5 (Jupiter) is supported. The Console Launcher is fetched at the vers
 already in your dependencies; add `junit-jupiter` as a test dependency. Options rayvn does not implement
 (`groups`, `forkCount`, `systemPropertyVariables`, ...) are printed as warnings, never silently dropped.
 
+## Modules without tests
+
+A module with no `.java` file under `src/test/java` is not compiled by `rvn test` unless a module that does have tests depends on it, directly or through other modules (its classes are on that module's classpath). `rvn verify` still compiles it, because it packages every module, but skips the test compile and run. In a multi-module workspace where most modules have no tests, this is most of the time `rvn test` took.
+
 ## JUnit XML reports
 
 Every run writes JUnit XML where Maven would: `target/surefire-reports/` for unit tests and `target/failsafe-reports/` for integration tests, in each module. CI systems that already read Maven's reports (Jenkins `junit`, GitLab `artifacts:reports:junit`, GitHub test reporters, IDEs) need no change: point them at `**/surefire-reports/TEST-*.xml` as before.
@@ -78,5 +82,6 @@ Start-up of a JVM and shared static state in tests are the costs; a few slow cla
 
 - **Gradle:** the `test` task is up to date when its declared inputs are unchanged, and failed runs are not cached. It forks worker JVMs with `maxParallelForks`. Inputs are whatever plugin authors and you annotate; nothing enforces them.
 - **Bazel:** each `java_test` is a cached action. A sandbox makes the declared inputs the only inputs, so an undeclared read fails. `shard_count` splits one target.
+- **Modules without tests:** Gradle skips `compileTestJava` as `NO-SOURCE` but still compiles main, which `test` depends on. Bazel has no such case: only the targets a test needs are built, so a library nobody tests is untouched. rayvn's `test` follows Bazel (build what a test needs); `verify` follows Gradle (main always builds, the test steps skip).
 - **Reports:** Maven's surefire writes `target/surefire-reports/TEST-*.xml` and rayvn uses the same paths. Gradle writes `build/test-results/test/*.xml` and replays them when the task is up to date from its build cache. Bazel writes one `test.xml` per target under `bazel-testlogs/` and streams it to the build event service. Replay on a cache hit is what Gradle and Bazel do and what rayvn does.
 - **rayvn:** Bazel's key and rule that failures are not cached, Gradle's trust in declared inputs (`inputs = [...]`) and no sandbox, so that a plain `pom.xml` keeps working.

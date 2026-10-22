@@ -25,6 +25,7 @@
 
 use anyhow::{Result, bail};
 use cli::{Args, Cmd};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -154,6 +155,7 @@ fn run_module(
     module: &reactor::Module,
     resolved: &[resolve::Resolved],
     provides_tests: bool,
+    has_tests: bool,
     cx: &Services,
 ) -> Result<Vec<verify::TestOutcome>> {
     let (root, dir) = (&module.effective, module.dir.as_path());
@@ -175,6 +177,12 @@ fn run_module(
                     verify::compile_tests(root, dir, &main_classes, resolved)?;
                 }
                 build::package(root, dir, &main_classes, resolved)?;
+                return Ok(vec![]);
+            }
+            if !has_tests {
+                if args.cmd == Cmd::Verify {
+                    build::package(root, dir, &main_classes, resolved)?;
+                }
                 return Ok(vec![]);
             }
             let test_classes = verify::compile_tests(root, dir, &main_classes, resolved)?;
@@ -323,10 +331,29 @@ fn run() -> Result<()> {
         config: &config,
     };
     let mut test_rows = vec![];
+    let with_tests: HashSet<usize> = if args.cmd.runs_tests() {
+        selected
+            .iter()
+            .copied()
+            .filter_map(|i| match verify::has_tests(&modules[i].dir) {
+                Ok(true) => Some(Ok(i)),
+                Ok(false) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<Result<_>>()?
+    } else {
+        HashSet::new()
+    };
+    let needed = reactor::needed_for_tests(&edges, &selected, &with_tests);
     for &i in &selected {
         let module = &modules[i];
         if many {
             eprintln!("==> {}", module.name());
+        }
+        if args.cmd == Cmd::Test && !needed.contains(&i) {
+            eprintln!("  no tests here, and no module with tests depends on it: skipped");
+            test_rows.push((module.name().to_string(), vec![]));
+            continue;
         }
         let lock_hash = lock::fingerprint(&reactor::lock_inputs(&modules, &edges, i))?;
         let resolved = dependencies(&args, module, &lock_hash, &repos, &loader)?;
@@ -341,6 +368,7 @@ fn run() -> Result<()> {
             module,
             &resolved,
             test_providers.contains(&i),
+            with_tests.contains(&i),
             &services,
         )?;
         test_rows.push((module.name().to_string(), outcomes));

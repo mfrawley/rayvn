@@ -328,6 +328,21 @@ pub fn test_class_providers(modules: &[Module], selected: &[usize]) -> HashSet<u
         .collect()
 }
 
+/// The modules of `selected` that a test run needs built: those in `with_tests` and everything they depend on,
+/// since their classpath holds the siblings' classes. The rest have no tests and no test-running dependent.
+pub fn needed_for_tests(
+    deps: &[Vec<usize>],
+    selected: &[usize],
+    with_tests: &HashSet<usize>,
+) -> HashSet<usize> {
+    selected
+        .iter()
+        .filter(|i| with_tests.contains(i))
+        .flat_map(|&i| reach(deps, i))
+        .filter(|i| selected.contains(i))
+        .collect()
+}
+
 /// The POM files that decide whether the lock of module `own` is current: its own POM chain, then the chains of the
 /// modules it depends on, directly or not, ordered by coordinates so that the answer does not depend on declaration
 /// order. A change to a module it does not use, or to another module's own dependencies' lock, leaves it fresh.
@@ -458,6 +473,33 @@ mod tests {
         assert_eq!(
             names(&ms, &select(&ms, None).unwrap()),
             ["util", "lib", "app"]
+        );
+    }
+
+    #[test]
+    fn a_test_run_needs_the_modules_with_tests_and_what_they_depend_on() {
+        let ms = three();
+        let edges = dependency_edges(&ms);
+        let sel = [2, 1, 0];
+        let need = |with: &[usize]| {
+            let mut v: Vec<usize> = needed_for_tests(&edges, &sel, &with.iter().copied().collect())
+                .into_iter()
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            need(&[1]),
+            [1, 2],
+            "lib's tests need util's classes; app is not needed"
+        );
+        assert_eq!(need(&[0]), [0, 1, 2]);
+        assert_eq!(need(&[2]), [2]);
+        assert!(need(&[]).is_empty());
+        assert_eq!(
+            needed_for_tests(&edges, &[1], &HashSet::from([1])).len(),
+            1,
+            "modules outside the selection are never needed"
         );
     }
 

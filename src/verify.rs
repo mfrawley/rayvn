@@ -74,6 +74,11 @@ fn relative_sources(dir: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Whether the module has test sources; without them there is nothing to compile or run.
+pub fn has_tests(dir: &Path) -> Result<bool> {
+    Ok(!java_sources(&dir.join("src/test/java"))?.is_empty())
+}
+
 /// Compiles the tests into `target/test-classes` and returns that directory.
 pub fn compile_tests(
     root: &Effective,
@@ -943,5 +948,19 @@ mod tests {
             record_name(&a, Phase::Unit),
             record_name(&a, Phase::Integration)
         );
+    }
+
+    #[test]
+    fn a_module_has_tests_only_if_it_has_java_test_sources() {
+        let d = std::env::temp_dir().join(format!("rvn-hastests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(!has_tests(&d).unwrap(), "no src/test/java at all");
+        std::fs::create_dir_all(d.join("src/test/java")).unwrap();
+        std::fs::create_dir_all(d.join("src/test/resources")).unwrap();
+        std::fs::write(d.join("src/test/resources/x.txt"), "").unwrap();
+        assert!(!has_tests(&d).unwrap(), "resources alone are not tests");
+        std::fs::write(d.join("src/test/java/ATest.java"), "class ATest {}").unwrap();
+        assert!(has_tests(&d).unwrap());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
