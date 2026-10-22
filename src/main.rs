@@ -359,9 +359,13 @@ fn pick(args: &Args, modules: &[reactor::Module]) -> Result<Vec<usize>> {
 }
 
 fn run() -> Result<()> {
-    // Downloads block on the network, so allow far more in flight than there are cores.
+    let threads = std::env::var("RAYON_NUM_THREADS")
+        .or_else(|_| std::env::var("RAYVN_MAX_THREADS"))
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32);
     rayon::ThreadPoolBuilder::new()
-        .num_threads(32)
+        .num_threads(threads)
         .build_global()
         .ok();
     let args = Args::from_env()?;

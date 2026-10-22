@@ -721,21 +721,49 @@ impl Repos {
         let url = format!("{}/{rel}", r.url);
         self.requests.fetch_add(1, Ordering::Relaxed);
         let cred = self.auth.read().unwrap().get(&r.id).cloned();
-        let mut req = self.agent.get(&url);
-        if let Some(c) = &cred {
-            req = req.header(
-                reqwest::header::AUTHORIZATION,
-                self.authorization(r, &url, c)?,
-            );
+
+        let mut last_err = None;
+        let mut resp = None;
+
+        for attempt in 1..=3 {
+            let mut req = self.agent.get(&url);
+            if let Some(c) = &cred {
+                req = req.header(
+                    reqwest::header::AUTHORIZATION,
+                    self.authorization(r, &url, c)?,
+                );
+            }
+            for (name, value) in conditional_headers(held) {
+                req = req.header(name, value);
+            }
+
+            match req.send() {
+                Ok(r_ok) => {
+                    let status = r_ok.status().as_u16();
+                    if attempt < 3
+                        && (status == 429 || status == 502 || status == 503 || status == 504)
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(250 * attempt as u64));
+                        continue;
+                    }
+                    resp = Some(r_ok);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 3 {
+                        std::thread::sleep(std::time::Duration::from_millis(250 * attempt as u64));
+                    }
+                }
+            }
         }
-        for (name, value) in conditional_headers(held) {
-            req = req.header(name, value);
-        }
-        let resp = match req.send() {
-            Ok(resp) => resp,
-            Err(e) => {
-                // Like Maven: an unreachable repository is skipped with a warning, not fatal.
-                self.mark_dead(r, &e.without_url().to_string());
+
+        let resp = match resp {
+            Some(resp) => resp,
+            None => {
+                let err_msg = last_err
+                    .map_or_else(|| "request failed".into(), |e| e.without_url().to_string());
+                self.mark_dead(r, &err_msg);
                 return Ok(Fetched::Missing);
             }
         };
