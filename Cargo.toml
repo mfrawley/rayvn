@@ -2,7 +2,7 @@
 name = "rayvn"
 version = "0.1.0"
 edition = "2024"
-authors = ["Mark Frawley <mark.frawley@moia.io>"]
+authors = ["Mark Frawley <mfrawley@pm.me>"]
 description = "A fast, Maven-compatible build tool in Rust"
 license = "MIT"
 readme = "README.md"
