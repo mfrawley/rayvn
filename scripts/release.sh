@@ -123,26 +123,34 @@ with open("Cargo.toml", "w") as f:
 echo "==> Updating Cargo.lock..."
 cargo check --quiet
 
-# Git commit & tag
-echo "==> Creating release commit and tag..."
+# Git commit
+echo "==> Creating release commit..."
 git add Cargo.toml Cargo.lock
 git commit -m "release: v$NEW_VERSION"
-git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
 
 echo ""
-echo "======================================================="
-echo " Release v$NEW_VERSION prepared and tagged successfully!"
-echo "======================================================="
-
 if [ "$PUBLISH" -eq 1 ]; then
-    echo "==> Pushing commit and tags to origin..."
-    git push origin main --tags
     echo "==> Publishing to crates.io..."
     cargo publish
-    echo "==> Successfully published v$NEW_VERSION!"
+    
+    echo "==> Tagging release v$NEW_VERSION..."
+    git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
+    
+    echo "==> Pushing release commit and tag to origin..."
+    git push origin main
+    git push origin "v$NEW_VERSION"
+    
+    echo ""
+    echo "======================================================="
+    echo " Successfully published and tagged v$NEW_VERSION!"
+    echo "======================================================="
 else
-    echo " To publish this release, execute:"
-    echo "   git push origin main --tags"
+    echo "======================================================="
+    echo " Release v$NEW_VERSION committed locally."
+    echo "======================================================="
+    echo " To complete publication and tagging, execute:"
     echo "   cargo publish"
+    echo "   git tag -a v$NEW_VERSION -m 'Release v$NEW_VERSION'"
+    echo "   git push origin main --tags"
     echo "======================================================="
 fi
