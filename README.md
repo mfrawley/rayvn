@@ -69,6 +69,8 @@ chmod +x .githooks/pre-commit scripts/check.sh
 
 `scripts/doc.sh` rebuilds the API docs (`target/doc/rayvn/index.html`) from scratch: it runs `cargo clean --doc` first, so pages for renamed or removed items do not linger.
 
+`scripts/release.sh <patch|minor|major|X.Y.Z>` automates releases: runs checks, updates `Cargo.toml` and `Cargo.lock`, and tags `vX.Y.Z` (`--dry-run` to preview, `--publish` to push and publish).
+
 ## Where things are
 
 - `proposals/`: design decisions, numbered, not rewritten after the fact.

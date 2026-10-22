@@ -2,6 +2,17 @@
 name = "rayvn"
 version = "0.1.0"
 edition = "2024"
+authors = ["Mark Frawley <mark.frawley@moia.io>"]
+description = "A fast, Maven-compatible build tool in Rust"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/mfrawley/rayvn"
+keywords = ["maven", "build-tool", "java", "pom", "resolver"]
+categories = ["development-tools::build-utils", "command-line-utilities"]
+exclude = [
+    ".githooks",
+    "proposals",
+]
 
 [[bin]]
 name = "rvn"
