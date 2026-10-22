@@ -45,7 +45,7 @@ pub fn line(text: &str) {
     emit(text, false);
 }
 
-/// Like [`line`] for output of another program (javac): indentation is kept, so its carets still line up, and
+/// Like [`line()`] for output of another program (javac): indentation is kept, so its carets still line up, and
 /// no output prints nothing.
 pub fn verbatim(text: &str) {
     if !text.trim().is_empty() {

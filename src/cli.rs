@@ -135,7 +135,7 @@ struct TestOpts {
     /// Store test results here (also RAYVN_TEST_CACHE, or `cache_dir` under `[test]` in rayvn.toml)
     #[arg(long, value_name = "DIR")]
     test_cache: Option<String>,
-    /// Write JUnit XML to <DIR>/surefire-reports and <DIR>/failsafe-reports instead of target/
+    /// Write JUnit XML to `<DIR>/surefire-reports` and `<DIR>/failsafe-reports` instead of target/
     #[arg(long, value_name = "DIR")]
     reports_dir: Option<String>,
 }
