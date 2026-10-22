@@ -54,20 +54,18 @@ jobs:
           fi
         shell: bash
 
-      - name: Package Tarball / Zip
+      - name: Package Tarball
         id: package
         run: |
           STAGE="rayvn-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$STAGE"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             cp "target/${{ matrix.target }}/release/rvn.exe" "$STAGE/"
-            7z a "$STAGE.zip" "$STAGE"
-            echo "ASSET=$STAGE.zip" >> $GITHUB_OUTPUT
           else
             cp "target/${{ matrix.target }}/release/rvn" "$STAGE/"
-            tar -czf "$STAGE.tar.gz" "$STAGE"
-            echo "ASSET=$STAGE.tar.gz" >> $GITHUB_OUTPUT
           fi
+          tar -czf "$STAGE.tar.gz" "$STAGE"
+          echo "ASSET=$STAGE.tar.gz" >> $GITHUB_OUTPUT
         shell: bash
 
       - name: Upload Release Asset
