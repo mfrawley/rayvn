@@ -33,6 +33,9 @@ fn render(prefix: Option<&str>, text: &str) -> String {
 }
 
 fn emit(text: &str, keep_indent: bool) {
+    if cfg!(test) && std::env::var_os("RAYVN_TEST_LOG").is_none() {
+        return;
+    }
     let out = PREFIX.with(|p| render_with(p.borrow().as_deref(), text, keep_indent));
     let _ = std::io::stderr().lock().write_all(out.as_bytes());
 }
