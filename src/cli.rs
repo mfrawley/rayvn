@@ -52,10 +52,10 @@ enum Command {
     #[command(
         after_help = "Example:\n  rvn lock -m api    lock one module of a multi-module build"
     )]
-    Lock(Common),
+    Lock(Parallel),
     /// Download exactly what rayvn.lock lists and verify its checksums (never reads POMs; for CI)
     #[command(after_help = "Example:\n  rvn fetch    restore the locked set on a CI machine")]
-    Fetch(Common),
+    Fetch(Parallel),
     /// Print the dependency tree, one line per artifact, indented by depth
     #[command(
         after_help = "Example:\n  rvn resolve | grep guava    which version of guava did we get?"
@@ -68,12 +68,12 @@ enum Command {
     Classpath(ClasspathOpts),
     /// Compile and package the jar into target/ (shaded if the POM configures maven-shade-plugin)
     #[command(
-        after_help = "Example:\n  rvn build --locked    CI: fail rather than re-resolve\n\nPrints the jar path on stdout."
+        after_help = "Examples:\n  rvn build --locked    CI: fail rather than re-resolve\n  rvn build -j 4        at most four modules at once\n\nPrints the jar path on stdout."
     )]
-    Build(Common),
+    Build(Parallel),
     /// Compile the tests and run the unit tests (surefire settings), skipping the run when nothing changed
     #[command(
-        after_help = "Examples:\n  rvn test --rerun            run the tests even if their inputs are unchanged\n  rvn test --test-cache /ci   keep results in a shared directory\n  rvn test --reports-dir out  write JUnit XML to out/surefire-reports\n\nSee docs/testing.md."
+        after_help = "Examples:\n  rvn test --rerun            run the tests even if their inputs are unchanged\n  rvn test --test-cache /ci   keep results in a shared directory\n  rvn test --reports-dir out  write JUnit XML to out/<module>/surefire-reports\n\nSee docs/testing.md."
     )]
     Test(TestOpts),
     /// Run the tests, package, then run the integration tests (failsafe settings)
@@ -106,6 +106,16 @@ struct Common {
     cold: bool,
 }
 
+/// Common flags plus the number of modules to work on at once.
+#[derive(ClapArgs, Debug)]
+struct Parallel {
+    #[command(flatten)]
+    common: Common,
+    /// Work on up to N modules at once (default: one per CPU); -j 1 goes one after another
+    #[arg(short = 'j', long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+    jobs: Option<u16>,
+}
+
 #[derive(ClapArgs, Debug)]
 struct ClasspathOpts {
     #[command(flatten)]
@@ -118,7 +128,7 @@ struct ClasspathOpts {
 #[derive(ClapArgs, Debug)]
 struct TestOpts {
     #[command(flatten)]
-    common: Common,
+    parallel: Parallel,
     /// Ignore the test result cache for this run
     #[arg(long)]
     rerun: bool,
@@ -160,6 +170,11 @@ impl Cmd {
         matches!(self, Cmd::Lock | Cmd::Fetch | Cmd::Resolve | Cmd::Classpath)
     }
 
+    /// Commands whose modules can be worked on side by side: the others print one module's result after another.
+    pub fn overlaps_modules(self) -> bool {
+        !matches!(self, Cmd::Resolve | Cmd::Classpath)
+    }
+
     pub fn runs_tests(self) -> bool {
         matches!(self, Cmd::Test | Cmd::Verify)
     }
@@ -177,6 +192,8 @@ pub struct Args {
     pub test_cache: Option<String>,
     pub reports_dir: Option<String>,
     pub module: Option<String>,
+    /// `-j`; `None` means one per CPU.
+    pub jobs: Option<usize>,
 }
 
 impl Args {
@@ -192,46 +209,41 @@ impl Args {
     }
 
     fn from_cli(cli: Cli) -> Result<Args> {
-        let (cmd, common, test, rerun, test_cache, reports_dir) = match cli.command {
-            Command::Lock(c) => (Cmd::Lock, c, false, false, None, None),
-            Command::Fetch(c) => (Cmd::Fetch, c, false, false, None, None),
-            Command::Resolve(c) => (Cmd::Resolve, c, false, false, None, None),
-            Command::Classpath(o) => (Cmd::Classpath, o.common, o.test, false, None, None),
-            Command::Build(c) => (Cmd::Build, c, false, false, None, None),
-            Command::Test(o) => (
-                Cmd::Test,
-                o.common,
-                false,
-                o.rerun,
-                o.test_cache,
-                o.reports_dir,
-            ),
-            Command::Verify(o) => (
-                Cmd::Verify,
-                o.common,
-                false,
-                o.rerun,
-                o.test_cache,
-                o.reports_dir,
-            ),
+        let base = |cmd: Cmd, c: Common| Args {
+            cmd,
+            pom_path: c.pom,
+            locked: c.locked,
+            refresh: c.cold || c.refresh,
+            cold: c.cold,
+            test: false,
+            rerun: false,
+            test_cache: None,
+            reports_dir: None,
+            module: c.module,
+            jobs: None,
         };
-        if common.cold && cmd == Cmd::Classpath {
+        let with_jobs = |cmd: Cmd, p: Parallel| Args {
+            jobs: p.jobs.map(usize::from),
+            ..base(cmd, p.common)
+        };
+        let args = match cli.command {
+            Command::Lock(p) => with_jobs(Cmd::Lock, p),
+            Command::Fetch(p) => with_jobs(Cmd::Fetch, p),
+            Command::Resolve(c) => base(Cmd::Resolve, c),
+            Command::Classpath(o) => Args {
+                test: o.test,
+                ..base(Cmd::Classpath, o.common)
+            },
+            Command::Build(p) => with_jobs(Cmd::Build, p),
+            Command::Test(o) => test_args(Cmd::Test, o, with_jobs),
+            Command::Verify(o) => test_args(Cmd::Verify, o, with_jobs),
+        };
+        if args.cold && args.cmd == Cmd::Classpath {
             bail!(
                 "--cold deletes its cache afterwards, so `classpath` would print paths that no longer exist"
             );
         }
-        Ok(Args {
-            cmd,
-            pom_path: common.pom,
-            locked: common.locked,
-            refresh: common.cold || common.refresh,
-            cold: common.cold,
-            test,
-            rerun,
-            test_cache,
-            reports_dir,
-            module: common.module,
-        })
+        Ok(args)
     }
 
     pub fn project_dir(&self) -> PathBuf {
@@ -240,6 +252,15 @@ impl Args {
             .filter(|p| !p.as_os_str().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+}
+
+fn test_args(cmd: Cmd, o: TestOpts, with_jobs: impl Fn(Cmd, Parallel) -> Args) -> Args {
+    Args {
+        rerun: o.rerun,
+        test_cache: o.test_cache,
+        reports_dir: o.reports_dir,
+        ..with_jobs(cmd, o.parallel)
     }
 }
 
@@ -323,6 +344,25 @@ mod tests {
     }
 
     #[test]
+    fn jobs_is_for_the_commands_that_work_on_many_modules() {
+        assert_eq!(parse(&["build", "-j", "4"]).jobs, Some(4));
+        assert_eq!(parse(&["test", "--jobs", "2"]).jobs, Some(2));
+        assert_eq!(parse(&["lock", "-j", "1"]).jobs, Some(1));
+        assert_eq!(parse(&["verify"]).jobs, None);
+        assert!(Args::parse(&["build", "-j", "0"]).is_err());
+        assert!(Args::parse(&["build", "-j"]).is_err());
+        assert!(Args::parse(&["classpath", "-j", "2"]).is_err());
+        assert!(Args::parse(&["resolve", "-j", "2"]).is_err());
+    }
+
+    #[test]
+    fn only_commands_that_print_one_result_per_module_stay_in_order() {
+        assert!(Cmd::Build.overlaps_modules() && Cmd::Test.overlaps_modules());
+        assert!(Cmd::Lock.overlaps_modules() && Cmd::Fetch.overlaps_modules());
+        assert!(!Cmd::Resolve.overlaps_modules() && !Cmd::Classpath.overlaps_modules());
+    }
+
+    #[test]
     fn module_flag_takes_a_name() {
         assert_eq!(
             parse(&["test", "-m", "core"]).module.as_deref(),
@@ -376,6 +416,8 @@ mod tests {
         let h = help_of(&["test", "--help"]);
         assert!(h.contains("--rerun") && h.contains("--test-cache"), "{h}");
         assert!(h.contains("--locked"), "common flags are listed too");
+        assert!(h.contains("--jobs"));
+        assert!(!help_of(&["resolve", "--help"]).contains("--jobs"));
         assert!(!help_of(&["lock", "--help"]).contains("--rerun"));
     }
 

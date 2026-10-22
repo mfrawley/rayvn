@@ -31,6 +31,18 @@ A POM that lists `<modules>` makes a workspace. Run `rvn` at the root, or with `
 
   Gradle runs `gradle test` per project with task-level caching and `--continue` to go past failures; Bazel runs `bazel test //...` with a result cache and `--keep_going`. rayvn matches the caching; continuing past a failure is not implemented yet.
 
+## Parallel builds
+
+Modules build side by side: `-j N` (default one per CPU) sets how many at once, `-j 1` goes one after another in the reactor's order. Each module is two steps. The first resolves its dependencies and compiles (main, and tests where they are used); the second packages the jar and runs the tests. A module's first step waits only for the first steps of the modules it depends on, so the tests of one module run while the modules above it compile. Compiles are preferred over test runs when both are ready, as they are what other modules wait for.
+
+- Output: every line is prefixed `[module]`, padded so the lines line up. `javac` output is captured and printed whole, so error messages are not torn apart. With `-j 1` the output is as it was, with a `==> module` header. The download counters are printed once at the end instead of after each module, and the single self-rewriting progress line is off.
+- Results on stdout (jar paths, `resolve`, `classpath`) are printed at the end in the reactor's order, so they do not depend on timing. `resolve` and `classpath` always go in order.
+- The first failure stops new modules from starting; those already running finish, and the others that fail are listed as `also failed:`. The error names the module. `--keep-going` is not implemented.
+- Integration tests of different modules never run at the same time (`docs/testing.md`).
+- Measured on a 24-module workspace with warm caches, `rvn build`: 33 s with `-j 1`, 11 s by default.
+
+Maven needs `-T` for this and its modules share `~/.m2`, which is why parallel Maven builds are treated with caution; Gradle runs the tasks of different projects at once with `--parallel` and `--max-workers`, and decides from the task graph, as here; Bazel runs whatever the dependency graph allows, up to `--jobs`, which is the default and not an option. rayvn's unit of work is the module, not the single task (a javac call, a jar): finer than that would need to know the inputs and outputs of each plugin, which a POM does not say.
+
 ## Leaving modules out
 
 A checkout often has sub-projects that should not be part of the build: archived code, infrastructure that needs other tooling, experiments. List them in `rayvn.toml` next to the root POM:

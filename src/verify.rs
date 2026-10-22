@@ -3,6 +3,7 @@
 //! `excludes` and skip settings in the POM; the plugins themselves are never executed.
 
 use crate::build::{compile, copy_resources, glob, java_sources};
+use crate::log::{self, say};
 use crate::model::{Effective, interpolate};
 use crate::pom::TestCfg;
 use crate::reports;
@@ -14,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 const SUREFIRE_INCLUDES: [&str; 4] = [
     "**/Test*.java",
@@ -94,7 +96,7 @@ pub fn compile_tests(
             .iter()
             .filter_map(|r| r.jar.as_ref().map(|p| p.display().to_string())),
     );
-    eprintln!("  compiling tests");
+    say!("  compiling tests");
     compile(root, &dir.join("src/test/java"), &out, &cp)?;
     copy_resources(&dir.join("src/test/resources"), &out)?;
     Ok(out)
@@ -302,19 +304,34 @@ fn pump(reader: impl std::io::BufRead, prefix: &str, out: &mut impl Write) -> Re
     Ok(all)
 }
 
-/// Runs `cmd`, streaming its output to stdout behind `prefix`, and reports success and the launcher's summary.
+/// Runs `cmd`, streaming its output behind `prefix` (stdout to stdout, stderr to stderr), and reports success and the
+/// launcher's summary.
 fn run_command(mut cmd: Command, prefix: &str) -> Result<Outcome> {
     let mut child = cmd
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .context("running java")?;
     let stdout = child.stdout.take().context("no stdout from java")?;
-    let output = pump(
-        std::io::BufReader::new(stdout),
-        prefix,
-        &mut std::io::stdout(),
-    )?;
+    let stderr = child.stderr.take().context("no stderr from java")?;
+    let output = std::thread::scope(|scope| -> Result<String> {
+        let errors = scope.spawn(|| {
+            pump(
+                std::io::BufReader::new(stderr),
+                prefix,
+                &mut std::io::stderr(),
+            )
+        });
+        let output = pump(
+            std::io::BufReader::new(stdout),
+            prefix,
+            &mut std::io::stdout(),
+        )?;
+        errors
+            .join()
+            .map_err(|_| anyhow::anyhow!("reading the test JVM's stderr panicked"))??;
+        Ok(output)
+    })?;
     let status = child.wait()?;
     Ok(Outcome {
         success: status.success(),
@@ -338,11 +355,12 @@ pub struct TestRun<'a> {
     pub reports_flag: Option<&'a str>,
 }
 
-/// Where the JUnit XML of `phase` goes: `<reports_flag>/<surefire|failsafe>-reports`, else
-/// `target/<surefire|failsafe>-reports` in the module. Absolute, because the test JVM runs in the module's directory.
-fn reports_dir(phase: Phase, flag: Option<&str>, module: &Path) -> Result<PathBuf> {
+/// Where the JUnit XML of `phase` goes: `<reports_flag>/<artifact>/<surefire|failsafe>-reports` (a directory per
+/// module, since every run clears its own), else `target/<surefire|failsafe>-reports` in the module. Absolute,
+/// because the test JVM runs in the module's directory.
+fn reports_dir(phase: Phase, flag: Option<&str>, module: &Path, artifact: &str) -> Result<PathBuf> {
     let base = match flag.filter(|f| !f.is_empty()) {
-        Some(f) => PathBuf::from(f),
+        Some(f) => PathBuf::from(f).join(artifact),
         None => module.join("target"),
     };
     Ok(std::path::absolute(base.join(phase.reports_name()))?)
@@ -381,24 +399,30 @@ pub enum TestOutcome {
     Cached(usize),
 }
 
+/// Integration tests of different modules do not run at the same time: they tend to share what the unit tests do
+/// not (ports, databases, files). Bazel's `exclusive` tag does the same.
+static INTEGRATION: Mutex<()> = Mutex::new(());
+
 /// Runs (or serves from the cache) the tests of `phase`. A failure is an error.
 pub fn run(phase: Phase, cx: &TestRun) -> Result<TestOutcome> {
+    let _alone = (phase == Phase::Integration)
+        .then(|| INTEGRATION.lock().unwrap_or_else(|e| e.into_inner()));
     let cfg = match phase {
         Phase::Unit => cx.root.surefire.clone(),
         Phase::Integration => cx.root.failsafe.clone(),
     }
     .unwrap_or_default();
     for i in &cfg.ignored {
-        eprintln!("  warning: test option not supported by rayvn, ignored: {i}");
+        say!("  warning: test option not supported by rayvn, ignored: {i}");
     }
     let sources = relative_sources(&cx.dir.join("src/test/java"))?;
     let plan = match plan(phase, &cfg, cx.root, &sources, cx.settings, cx.rerun) {
         Selection::Skipped => {
-            eprintln!("  {} skipped by the POM", phase.label());
+            say!("  {} skipped by the POM", phase.label());
             return Ok(TestOutcome::NoTests);
         }
         Selection::Empty => {
-            eprintln!("  no {} selected", phase.label());
+            say!("  no {} selected", phase.label());
             return Ok(TestOutcome::NoTests);
         }
         Selection::Run(p) => p,
@@ -431,12 +455,14 @@ pub fn run(phase: Phase, cx: &TestRun) -> Result<TestOutcome> {
         cx.dir,
     );
     let record = record_name(cx.root, phase);
-    let reports = reports_dir(phase, cx.reports_flag, cx.dir)?;
+    let reports = reports_dir(phase, cx.reports_flag, cx.dir, &cx.root.gav.artifact)?;
     let stored = stored_reports(&store, &record);
     // A record without stored XML (written before reports existed) would leave CI with nothing to read.
     let use_cache = plan.use_cache && !reports::files(&stored)?.is_empty();
+    // The shard threads are not this thread, so they get the module's prefix from here.
+    let module_prefix = log::prefix().unwrap_or_default();
     let verdict = testcache::run_cached(&store, &record, &key, use_cache, || {
-        eprintln!(
+        say!(
             "  running {} {} with JUnit in {} JVM(s)",
             plan.classes.len(),
             phase.label(),
@@ -445,9 +471,9 @@ pub fn run(phase: Phase, cx: &TestRun) -> Result<TestOutcome> {
         reports::clear(&reports)?;
         testcache::run_shards(&shards, |i, classes| {
             let prefix = if shards.len() > 1 {
-                format!("[{}] ", i + 1)
+                format!("{module_prefix}[{}] ", i + 1)
             } else {
-                String::new()
+                module_prefix.clone()
             };
             let private = reports::shard_dir(&reports, i);
             std::fs::create_dir_all(&private)?;
@@ -461,17 +487,17 @@ pub fn run(phase: Phase, cx: &TestRun) -> Result<TestOutcome> {
     match verdict {
         Verdict::Cached(r) => {
             let n = reports::copy_set(&stored, &reports)?;
-            eprintln!(
+            say!(
                 "  {} up to date: {} passed (cached, inputs unchanged; --rerun to force)",
                 phase.label(),
                 r.summary.successful
             );
-            eprintln!("  {}", reports_line(n, &reports));
+            say!("  {}", reports_line(n, &reports));
             Ok(TestOutcome::Cached(r.summary.successful))
         }
         Verdict::Ran(o) => {
             let n = reports::files(&reports)?.len();
-            eprintln!("  {}", reports_line(n, &reports));
+            say!("  {}", reports_line(n, &reports));
             if !o.success {
                 bail!("{} failed", phase.label());
             }
@@ -479,7 +505,7 @@ pub fn run(phase: Phase, cx: &TestRun) -> Result<TestOutcome> {
                 reports::copy_set(&reports, &stored)?;
             }
             let passed = o.summary.map(|s| s.successful);
-            eprintln!(
+            say!(
                 "  {} passed{}",
                 phase.label(),
                 passed.map(|n| format!(": {n}")).unwrap_or_default()
@@ -629,19 +655,20 @@ mod tests {
     fn reports_go_where_maven_puts_them_unless_redirected() {
         let module = Path::new("/w/mod");
         assert_eq!(
-            reports_dir(Phase::Unit, None, module).unwrap(),
+            reports_dir(Phase::Unit, None, module, "mod").unwrap(),
             Path::new("/w/mod/target/surefire-reports")
         );
         assert_eq!(
-            reports_dir(Phase::Integration, None, module).unwrap(),
+            reports_dir(Phase::Integration, None, module, "mod").unwrap(),
             Path::new("/w/mod/target/failsafe-reports")
         );
         assert_eq!(
-            reports_dir(Phase::Unit, Some("/ci/out"), module).unwrap(),
-            Path::new("/ci/out/surefire-reports")
+            reports_dir(Phase::Unit, Some("/ci/out"), module, "mod").unwrap(),
+            Path::new("/ci/out/mod/surefire-reports"),
+            "one directory per module, so that modules do not clear each other's reports"
         );
         assert_eq!(
-            reports_dir(Phase::Unit, Some(""), module).unwrap(),
+            reports_dir(Phase::Unit, Some(""), module, "mod").unwrap(),
             Path::new("/w/mod/target/surefire-reports"),
             "an empty value counts as unset"
         );
@@ -898,6 +925,18 @@ mod tests {
                 summary: None
             }
         );
+    }
+
+    #[test]
+    fn run_command_drains_stderr_too() {
+        let mut noisy = Command::new("sh");
+        noisy.args([
+            "-c",
+            "yes 'a line of stderr that is long enough to fill the pipe quickly, well past the 64 KB a pipe holds' | head -n 2000 >&2; echo '[ 1 tests found ]'; echo '[ 1 tests successful ]'; echo '[ 0 tests failed ]'",
+        ]);
+        let o = run_command(noisy, "").unwrap();
+        assert!(o.success, "a full stderr pipe must not stall the JVM");
+        assert_eq!(o.summary.map(|s| s.successful), Some(1));
     }
 
     #[test]

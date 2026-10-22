@@ -11,7 +11,7 @@ Compatibility is judged by results (same classpath, same jar contents), not by r
 ## Usage
 
 ```text
-rvn <command> [-f pom.xml] [-m module] [--locked] [--refresh] [--cold]
+rvn <command> [-f pom.xml] [-m module] [-j N] [--locked] [--refresh] [--cold]
 ```
 
 `rvn --help` lists the commands and the environment variables; `rvn <command> --help` shows that command's flags with examples. A flag that means nothing for a command (`rvn classpath --rerun`) is an error, and a mistyped command gets a suggestion.
@@ -30,11 +30,12 @@ rvn <command> [-f pom.xml] [-m module] [--locked] [--refresh] [--cold]
 |---|---|
 | `-f <path>` | Use this POM instead of `./pom.xml`. The lockfile goes beside it. |
 | `-m <module>` | Multi-module: this module and what it depends on (only this one for `lock`, `fetch`, `resolve`, `classpath`). See `docs/workspace.md`. |
+| `-j <N>`, `--jobs <N>` | `lock`, `fetch`, `build`, `test`, `verify`: work on up to N modules at once (default: one per CPU). A module starts when the modules it depends on are compiled. `-j 1` goes one after another. See `docs/workspace.md`. |
 | `--locked` | Fail if `rayvn.lock` is missing or stale, instead of resolving. |
 | `--refresh` | Ignore `rayvn.lock` and the miss cache for this run; the lock is rewritten. |
 | `--test-cache <dir>` | `test`/`verify`: store test results here (also `RAYVN_TEST_CACHE`, `[test] cache_dir`). |
 | `--rerun` | `test`/`verify`: ignore the test result cache for this run. |
-| `--reports-dir <dir>` | `test`/`verify`: write JUnit XML to `<dir>/surefire-reports` and `<dir>/failsafe-reports` instead of `target/`. |
+| `--reports-dir <dir>` | `test`/`verify`: write JUnit XML to `<dir>/<artifact>/surefire-reports` and `<dir>/<artifact>/failsafe-reports` instead of `target/`. |
 | `--cold` | Use a throwaway cache, deleted afterwards. Implies `--refresh`. Not allowed with `classpath`. |
 
 Progress and summaries go to stderr and results to stdout, so output pipes cleanly.
@@ -47,6 +48,7 @@ rvn fetch                         # CI: restore exactly the locked set
 rvn build --locked                # CI: fail rather than re-resolve
 rvn test                          # compile src/test/java, run surefire-selected JUnit 5 tests
 rvn verify                        # test, package, then run failsafe-selected integration tests
+rvn build -j 4                    # a multi-module build, four modules at a time
 rvn test --rerun                  # run the tests even if their inputs are unchanged
 rvn resolve | grep guava          # which version of guava did we get?
 java -cp "$(rvn classpath):target/classes" app.Main

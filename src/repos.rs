@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -89,7 +89,8 @@ pub struct Repos {
     avoided: AtomicUsize,
     by_repo: Mutex<BTreeMap<String, usize>>,
     last_draw: Mutex<Instant>,
-    tty: bool,
+    /// Draw the status line? Only on a terminal, and not while several modules print their own lines.
+    tty: AtomicBool,
 }
 
 impl Repos {
@@ -189,7 +190,7 @@ impl Repos {
             avoided: AtomicUsize::new(0),
             by_repo: Mutex::new(BTreeMap::new()),
             last_draw: Mutex::new(Instant::now()),
-            tty: std::io::stderr().is_terminal(),
+            tty: AtomicBool::new(std::io::stderr().is_terminal()),
         })
     }
 
@@ -625,7 +626,7 @@ impl Repos {
 
     /// Single updating status line on stderr, only on a terminal and at most ~12 times a second.
     fn progress(&self) {
-        if !self.tty {
+        if !self.tty.load(Ordering::Relaxed) {
             return;
         }
         let Ok(mut last) = self.last_draw.try_lock() else {
@@ -644,8 +645,15 @@ impl Repos {
         );
     }
 
+    /// Stops drawing the status line, for good: a single line that rewrites itself cannot share the terminal with
+    /// the output of modules built side by side.
+    pub fn stop_progress(&self) {
+        self.clear_progress();
+        self.tty.store(false, Ordering::Relaxed);
+    }
+
     pub fn clear_progress(&self) {
-        if self.tty {
+        if self.tty.load(Ordering::Relaxed) {
             eprint!("\r\x1b[2K");
         }
     }

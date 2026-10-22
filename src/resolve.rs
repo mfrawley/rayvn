@@ -1,6 +1,7 @@
 //! Dependency resolution: breadth-first over the graph, Maven's "nearest wins" version mediation, scope
 //! mediation, exclusions and optional dependencies. POMs at each depth are loaded in parallel.
 
+use crate::log::say;
 use crate::model::{Effective, Loader, LocalModules};
 use crate::pom::{Dep, Gav, Relocation, extension_of, stored_classifier};
 use crate::repos::{Located, Repos};
@@ -215,7 +216,7 @@ fn relocated(mut n: Node, loader: &Loader, managed: &HashMap<String, Dep>) -> Re
         if !apply_relocation(&mut n, &r, managed) {
             return Ok(n);
         }
-        eprintln!(
+        say!(
             "warning: {from} has been relocated to {}",
             Gav::new(&n.dep.group, &n.dep.artifact, &n.version)
         );
@@ -252,7 +253,7 @@ fn pinned(mut n: Node, versions: VersionLister) -> Result<Node> {
             listed.len()
         );
     };
-    eprintln!("range {name} {} -> {best}", n.version);
+    say!("range {name} {} -> {best}", n.version);
     n.version = best;
     Ok(n)
 }

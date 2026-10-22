@@ -1,6 +1,7 @@
 //! `rvn build`: compile the main sources with `javac` against the resolved classpath, then package a jar,
 //! shaded into a single fat jar when the POM configures `maven-shade-plugin`.
 
+use crate::log::{self, say};
 use crate::model::Effective;
 use crate::pom::ShadeCfg;
 use crate::resolve::Resolved;
@@ -65,12 +66,17 @@ pub(crate) fn clean_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Writes the jar from `classes`, shaded as the POM configures, and prints its path.
-pub fn package(root: &Effective, dir: &Path, classes: &Path, resolved: &[Resolved]) -> Result<()> {
+/// Writes the jar from `classes`, shaded as the POM configures, and returns its path.
+pub fn package(
+    root: &Effective,
+    dir: &Path,
+    classes: &Path,
+    resolved: &[Resolved],
+) -> Result<PathBuf> {
     let target = dir.join("target");
     let jar_path = target.join(format!("{}-{}.jar", root.gav.artifact, root.gav.version));
     write_jar(classes, &jar_path)?;
-    eprintln!("  packaged {} ({})", jar_path.display(), size(&jar_path));
+    say!("  packaged {} ({})", jar_path.display(), size(&jar_path));
     let mut result = jar_path.clone();
     if let Some(cfg) = &root.shade {
         result = shaded_path(
@@ -86,8 +92,7 @@ pub fn package(root: &Effective, dir: &Path, classes: &Path, resolved: &[Resolve
             shade_into(cfg, &jar_path, &result, resolved, &target)?;
         }
     }
-    println!("{}", result.display());
-    Ok(())
+    Ok(result)
 }
 
 /// Where `maven-shade-plugin` puts the shaded jar: `<finalName>.jar` when configured, else
@@ -195,17 +200,20 @@ pub(crate) fn compile(
     }
     let level = JavaLevel::of(root);
     let flags = level.args();
-    eprintln!(
+    say!(
         "  compiling {} sources with javac{}{}, {} classpath entries",
         sources.len(),
         if flags.is_empty() { "" } else { " " },
         flags.join(" "),
         classpath.len()
     );
-    let status = javac_command(classes, &level, classpath, &sources)
-        .status()
+    // Captured, so that the output of modules compiling side by side does not mix.
+    let out = javac_command(classes, &level, classpath, &sources)
+        .output()
         .context("running javac")?;
-    if !status.success() {
+    log::verbatim(String::from_utf8_lossy(&out.stdout).trim_end());
+    log::verbatim(String::from_utf8_lossy(&out.stderr).trim_end());
+    if !out.status.success() {
         bail!("javac failed");
     }
     Ok(())
@@ -247,7 +255,7 @@ pub(crate) fn copy_resources(res_dir: &Path, classes: &Path) -> Result<()> {
         &mut resources,
     )?;
     if !resources.is_empty() {
-        eprintln!("  copying {} resources", resources.len());
+        say!("  copying {} resources", resources.len());
     }
     for r in &resources {
         let dest = classes.join(r.strip_prefix(res_dir)?);
@@ -313,10 +321,10 @@ fn shade_into(
     target: &Path,
 ) -> Result<()> {
     for i in &cfg.ignored {
-        eprintln!("  warning: shade option not supported by rayvn, ignored: {i}");
+        say!("  warning: shade option not supported by rayvn, ignored: {i}");
     }
     let n = shade(cfg, plain, &shaded_dependencies(resolved, target)?, out)?;
-    eprintln!(
+    say!(
         "  shaded {} dependency jars into {} ({})",
         n,
         out.display(),

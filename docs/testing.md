@@ -29,6 +29,10 @@ already in your dependencies; add `junit-jupiter` as a test dependency. Options 
 
 A module with no `.java` file under `src/test/java` is not compiled by `rvn test` unless a module that does have tests depends on it, directly or through other modules (its classes are on that module's classpath). `rvn verify` still compiles it, because it packages every module, but skips the test compile and run. In a multi-module workspace where most modules have no tests, this is most of the time `rvn test` took.
 
+## Several modules at once
+
+In a multi-module build the modules run side by side (`-j`, see `docs/workspace.md`): the unit tests of one module run while the next one compiles. Every line of output then starts with `[module]`, the output of the test JVMs included (`[module] [2]` for shard 2). The integration tests of different modules never overlap with each other, because they tend to share ports, databases and files; Bazel's `exclusive` tag does the same for tests that must run alone. A test JVM's stderr is shown behind the same prefix as its stdout.
+
 ## JUnit XML reports
 
 Every run writes JUnit XML where Maven would: `target/surefire-reports/` for unit tests and `target/failsafe-reports/` for integration tests, in each module. CI systems that already read Maven's reports (Jenkins `junit`, GitLab `artifacts:reports:junit`, GitHub test reporters, IDEs) need no change: point them at `**/surefire-reports/TEST-*.xml` as before.
@@ -36,7 +40,7 @@ Every run writes JUnit XML where Maven would: `target/surefire-reports/` for uni
 - One file per test JVM: `TEST-junit-jupiter.xml`, or `TEST-junit-jupiter-1.xml`, `-2.xml`, ... when `shards` is set. Each JVM writes into a private directory first, so parallel shards cannot overwrite each other.
 - The reports of an earlier run are removed before the next run, so a report never lists tests that no longer exist.
 - A result served from the cache starts no JVM, so the XML of the run it stands for is stored beside the cache record (`<group>.<artifact>.<phase>.reports/`) and copied back. The report is there on exactly the runs where the cache works. A record from before reports existed has no XML to copy and is treated as a miss, so the tests run once more.
-- `--reports-dir <dir>` writes `<dir>/surefire-reports` and `<dir>/failsafe-reports` instead of `target/`. In a multi-module build every module writes to the same directory, so use it for a single module (`-m`) or leave the default.
+- `--reports-dir <dir>` writes `<dir>/<artifact>/surefire-reports` and `<dir>/<artifact>/failsafe-reports` instead of `target/`: a directory per module, because every run clears its own reports.
 - Failed runs keep their reports (that is when you need them) but are never stored in the cache.
 
 The XML is the Console Launcher's own (`--reports-dir`), in the Open Test Reporting-compatible "legacy" format that surefire's tooling reads.
@@ -83,5 +87,6 @@ Start-up of a JVM and shared static state in tests are the costs; a few slow cla
 - **Gradle:** the `test` task is up to date when its declared inputs are unchanged, and failed runs are not cached. It forks worker JVMs with `maxParallelForks`. Inputs are whatever plugin authors and you annotate; nothing enforces them.
 - **Bazel:** each `java_test` is a cached action. A sandbox makes the declared inputs the only inputs, so an undeclared read fails. `shard_count` splits one target.
 - **Modules without tests:** Gradle skips `compileTestJava` as `NO-SOURCE` but still compiles main, which `test` depends on. Bazel has no such case: only the targets a test needs are built, so a library nobody tests is untouched. rayvn's `test` follows Bazel (build what a test needs); `verify` follows Gradle (main always builds, the test steps skip).
+- **Parallelism:** Gradle runs tasks of different projects at once with `--parallel` and caps them with `--max-workers`; tests in one project fork with `maxParallelForks`. Bazel runs `--jobs` actions and `--local_test_jobs` tests at once, and the `exclusive` tag keeps a test from running beside any other. rayvn has `-j` for modules (like Gradle's project-level parallelism) and `shards` inside a module, and serializes integration tests like `exclusive`.
 - **Reports:** Maven's surefire writes `target/surefire-reports/TEST-*.xml` and rayvn uses the same paths. Gradle writes `build/test-results/test/*.xml` and replays them when the task is up to date from its build cache. Bazel writes one `test.xml` per target under `bazel-testlogs/` and streams it to the build event service. Replay on a cache hit is what Gradle and Bazel do and what rayvn does.
 - **rayvn:** Bazel's key and rule that failures are not cached, Gradle's trust in declared inputs (`inputs = [...]`) and no sandbox, so that a plain `pom.xml` keeps working.

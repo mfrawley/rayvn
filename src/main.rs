@@ -15,30 +15,36 @@
 //! 5. `repos`: ask repositories (routed, hinted, cached, with a miss cache) and keep the local cache;
 //!    bookkeeping lives in one file, see `index`.
 //! 6. `lock`: write or read `rayvn.lock`, which pins versions, repositories and checksums.
-//! 7. `build`: compile with `javac` and package the jar (shaded when the POM asks for it).
-//! 8. `verify`, `testcache` and `reports`: compile the tests and run them with JUnit, selected as surefire and
+//! 7. `schedule` and `log`: modules are worked on side by side, each starting when the modules it depends on are
+//!    compiled; `log` prefixes the lines of each module so that the output stays readable.
+//! 8. `build`: compile with `javac` and package the jar (shaded when the POM asks for it).
+//! 9. `verify`, `testcache` and `reports`: compile the tests and run them with JUnit, selected as surefire and
 //!    failsafe would, sharded across JVMs and skipped when nothing they depend on has changed; the results are
 //!    written as JUnit XML where CI systems expect them.
 //!
 //! Credentials never appear in these types as plain config values; `secret` resolves them from the
 //! environment or a helper command at the moment of use.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use cli::{Args, Cmd};
+use log::say;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 mod build;
 mod cli;
 mod index;
 mod lock;
+mod log;
 mod model;
 mod pom;
 mod reactor;
 mod reports;
 mod repos;
 mod resolve;
+mod schedule;
 mod secret;
 mod settings;
 mod testcache;
@@ -85,17 +91,17 @@ fn dependencies(
         lock::read_fresh(&lock_path, lock_hash)
     };
     if let Some(l) = fresh {
-        eprintln!("  using rayvn.lock ({} packages)", l.package.len());
+        say!("  using rayvn.lock ({} packages)", l.package.len());
         let resolved = lock::realize(&l, repos, loader.locals())?;
         if fetch {
             let (ok, skipped) = lock::verify(&l, &resolved)?;
-            eprintln!(
+            say!(
                 "  verified {ok} files against rayvn.lock ({skipped} not checkable: no checksum recorded, SNAPSHOT, or a module of this build)"
             );
         }
         return Ok(resolved);
     }
-    eprintln!("  resolving dependencies");
+    say!("  resolving dependencies");
     if fetch || args.locked {
         bail!(
             "{} is missing or out of date; run `rvn lock`",
@@ -105,7 +111,7 @@ fn dependencies(
     let resolved = resolve::resolve(&module.effective, loader, repos, true)?;
     lock::write(&lock_path, lock_hash, &resolved, repos)?;
     repos.clear_progress();
-    eprintln!("  wrote {}", lock_path.display());
+    say!("  wrote {}", lock_path.display());
     Ok(resolved)
 }
 
@@ -145,25 +151,82 @@ fn unrun_warnings(root: &model::Effective) -> Vec<String> {
 }
 
 fn warn_unrun(root: &model::Effective) {
-    unrun_warnings(root).iter().for_each(|w| eprintln!("{w}"));
+    unrun_warnings(root).iter().for_each(|w| say!("{w}"));
 }
 
-/// What `args.cmd` does for one module, once its dependencies are known. Returns `false` when nothing was built
-/// (so there is nothing to report).
-fn run_module(
-    args: &Args,
-    module: &reactor::Module,
-    resolved: &[resolve::Resolved],
-    provides_tests: bool,
-    has_tests: bool,
-    cx: &Services,
-) -> Result<Vec<verify::TestOutcome>> {
-    let (root, dir) = (&module.effective, module.dir.as_path());
-    match args.cmd {
-        Cmd::Lock | Cmd::Fetch => {}
-        Cmd::Resolve => resolve_lines(resolved).iter().for_each(|l| println!("{l}")),
-        Cmd::Classpath => println!("{}", classpath_line(resolved, args.test)),
-        Cmd::Build | Cmd::Test | Cmd::Verify => {
+/// What the first half of the work on a module leaves for the second.
+#[derive(Default)]
+struct Built {
+    resolved: Vec<resolve::Resolved>,
+    /// `None` when nothing was compiled: `lock`, `fetch`, `resolve`, `classpath`, or a module `rvn test` skips.
+    main_classes: Option<PathBuf>,
+    test_classes: Option<PathBuf>,
+}
+
+/// What the second half produced for a module.
+#[derive(Default)]
+struct Done {
+    /// Result lines, printed on stdout once all modules are done so that their order does not depend on timing.
+    stdout: Vec<String>,
+    outcomes: Vec<verify::TestOutcome>,
+}
+
+/// Does `cmd` compile the tests of a module? `build` does where another module uses them (a `test-jar`
+/// dependency); `test` and `verify` where the module has tests.
+fn compiles_tests(cmd: Cmd, provides_tests: bool, has_tests: bool) -> bool {
+    if cmd == Cmd::Build {
+        provides_tests
+    } else {
+        cmd.runs_tests() && has_tests
+    }
+}
+
+/// Everything the work on one module reads, shared by all modules being worked on.
+struct Ctx<'a> {
+    args: &'a Args,
+    modules: &'a [reactor::Module],
+    edges: &'a [Vec<usize>],
+    repos: &'a repos::Repos,
+    loader: &'a model::Loader<'a>,
+    config: &'a settings::Config,
+    /// Modules with at least one file under `src/test/java`.
+    with_tests: HashSet<usize>,
+    /// Modules whose test classes another module uses.
+    test_providers: HashSet<usize>,
+    /// Modules `rvn test` has to build: those with tests and what they need.
+    needed: HashSet<usize>,
+    /// Modules are worked on side by side, so their output is told apart by a prefix and the cumulative
+    /// download summary is left to the end.
+    overlapping: bool,
+}
+
+impl Ctx<'_> {
+    /// First half: the module's dependencies, then its classes (and test classes where they are used). Other modules
+    /// can start as soon as this is done.
+    fn prepare(&self, i: usize) -> Result<Built> {
+        let (args, module) = (self.args, &self.modules[i]);
+        if args.cmd == Cmd::Test && !self.needed.contains(&i) {
+            say!("  no tests here, and no module with tests depends on it: skipped");
+            return Ok(Built::default());
+        }
+        let lock_hash = lock::fingerprint(&reactor::lock_inputs(self.modules, self.edges, i))?;
+        let resolved = dependencies(args, module, &lock_hash, self.repos, self.loader)?;
+        let direct = resolved.iter().filter(|r| r.depth == 1).count();
+        if self.overlapping {
+            say!("  {} artifacts ({direct} direct)", resolved.len());
+        } else {
+            say!(
+                "  {} artifacts ({direct} direct): {}",
+                resolved.len(),
+                self.repos.summary()
+            );
+        }
+        let mut built = Built {
+            resolved,
+            ..Built::default()
+        };
+        if matches!(args.cmd, Cmd::Build | Cmd::Test | Cmd::Verify) {
+            let (root, dir) = (&module.effective, module.dir.as_path());
             if root.packaging != "jar" {
                 bail!(
                     "packaging '{}' is not supported yet (only jar)",
@@ -171,42 +234,75 @@ fn run_module(
                 );
             }
             warn_unrun(root);
-            let main_classes = build::compile_main(root, dir, resolved)?;
-            if args.cmd == Cmd::Build {
-                if provides_tests {
-                    verify::compile_tests(root, dir, &main_classes, resolved)?;
-                }
-                build::package(root, dir, &main_classes, resolved)?;
-                return Ok(vec![]);
+            let main = build::compile_main(root, dir, &built.resolved)?;
+            if compiles_tests(
+                args.cmd,
+                self.test_providers.contains(&i),
+                self.with_tests.contains(&i),
+            ) {
+                built.test_classes =
+                    Some(verify::compile_tests(root, dir, &main, &built.resolved)?);
             }
-            if !has_tests {
-                if args.cmd == Cmd::Verify {
-                    build::package(root, dir, &main_classes, resolved)?;
-                }
-                return Ok(vec![]);
-            }
-            let test_classes = verify::compile_tests(root, dir, &main_classes, resolved)?;
-            let run = verify::TestRun {
-                root,
-                dir,
-                main_classes: &main_classes,
-                test_classes: &test_classes,
-                resolved,
-                repos: cx.repos,
-                settings: &cx.config.test,
-                rerun: args.rerun,
-                cache_flag: args.test_cache.as_deref(),
-                reports_flag: args.reports_dir.as_deref(),
-            };
-            let mut outcomes = vec![verify::run(verify::Phase::Unit, &run)?];
-            if args.cmd == Cmd::Verify {
-                build::package(root, dir, &main_classes, resolved)?;
-                outcomes.push(verify::run(verify::Phase::Integration, &run)?);
-            }
-            return Ok(outcomes);
+            built.main_classes = Some(main);
         }
+        Ok(built)
     }
-    Ok(vec![])
+
+    /// Second half: package the jar and run the tests, as the command asks.
+    fn finish(&self, i: usize, built: &Built) -> Result<Done> {
+        let (args, module) = (self.args, &self.modules[i]);
+        let (root, dir) = (&module.effective, module.dir.as_path());
+        let mut done = Done::default();
+        match args.cmd {
+            Cmd::Lock | Cmd::Fetch => {}
+            Cmd::Resolve => done.stdout = resolve_lines(&built.resolved),
+            Cmd::Classpath => done.stdout = vec![classpath_line(&built.resolved, args.test)],
+            Cmd::Build | Cmd::Test | Cmd::Verify => {
+                let Some(main) = &built.main_classes else {
+                    return Ok(done);
+                };
+                let package = |done: &mut Done| -> Result<()> {
+                    let jar = build::package(root, dir, main, &built.resolved)?;
+                    done.stdout.push(jar.display().to_string());
+                    Ok(())
+                };
+                if args.cmd == Cmd::Build {
+                    package(&mut done)?;
+                    return Ok(done);
+                }
+                let Some(test) = &built.test_classes else {
+                    if args.cmd == Cmd::Verify {
+                        package(&mut done)?;
+                    }
+                    return Ok(done);
+                };
+                let run = verify::TestRun {
+                    root,
+                    dir,
+                    main_classes: main,
+                    test_classes: test,
+                    resolved: &built.resolved,
+                    repos: self.repos,
+                    settings: &self.config.test,
+                    rerun: args.rerun,
+                    cache_flag: args.test_cache.as_deref(),
+                    reports_flag: args.reports_dir.as_deref(),
+                };
+                done.outcomes.push(verify::run(verify::Phase::Unit, &run)?);
+                if args.cmd == Cmd::Verify {
+                    package(&mut done)?;
+                    done.outcomes
+                        .push(verify::run(verify::Phase::Integration, &run)?);
+                }
+            }
+        }
+        Ok(done)
+    }
+}
+
+/// `[name] ` padded to `width`, so that the lines of modules building side by side line up.
+fn line_prefix(name: &str, width: usize) -> String {
+    format!("[{name:<width$}] ")
 }
 
 /// The closing table of a multi-module `test` or `verify`: one line per module and a total.
@@ -239,11 +335,6 @@ fn test_report(rows: &[(String, Vec<verify::TestOutcome>)]) -> Vec<String> {
     let silent = rows.len() - modules_with_tests;
     lines.push(format!("  total: {} passed in {modules_with_tests} modules ({cached} cached); {silent} modules have no tests", ran + cached));
     lines
-}
-
-struct Services<'a> {
-    repos: &'a repos::Repos,
-    config: &'a settings::Config,
 }
 
 /// The modules `args` acts on, in build order, aggregators left out. Commands that only read dependencies
@@ -325,12 +416,6 @@ fn run() -> Result<()> {
             String::new()
         }
     );
-    let test_providers = reactor::test_class_providers(&modules, &selected);
-    let services = Services {
-        repos: &repos,
-        config: &config,
-    };
-    let mut test_rows = vec![];
     let with_tests: HashSet<usize> = if args.cmd.runs_tests() {
         selected
             .iter()
@@ -344,34 +429,76 @@ fn run() -> Result<()> {
     } else {
         HashSet::new()
     };
-    let needed = reactor::needed_for_tests(&edges, &selected, &with_tests);
-    for &i in &selected {
-        let module = &modules[i];
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let jobs = schedule::job_count(args.jobs, cpus, args.cmd.overlaps_modules(), selected.len());
+    let cx = Ctx {
+        args: &args,
+        modules: &modules,
+        edges: &edges,
+        repos: &repos,
+        loader: &loader,
+        config: &config,
+        needed: reactor::needed_for_tests(&edges, &selected, &with_tests),
+        with_tests,
+        test_providers: reactor::test_class_providers(&modules, &selected),
+        overlapping: jobs > 1,
+    };
+    if cx.overlapping {
+        repos.stop_progress();
+    }
+    let position: std::collections::HashMap<usize, usize> =
+        selected.iter().enumerate().map(|(p, &i)| (i, p)).collect();
+    let depends_on: Vec<Vec<usize>> = selected
+        .iter()
+        .map(|&i| {
+            edges[i]
+                .iter()
+                .filter_map(|d| position.get(d).copied())
+                .collect()
+        })
+        .collect();
+    let layout = schedule::layout(&depends_on, jobs);
+    let width = selected
+        .iter()
+        .map(|&i| modules[i].name().len())
+        .max()
+        .unwrap_or(0);
+    let built: Vec<OnceLock<Built>> = selected.iter().map(|_| OnceLock::new()).collect();
+    let results = schedule::run(&layout.deps, &layout.order, jobs, |task| {
+        let (p, compiling) = (task / 2, task % 2 == 0);
+        let i = selected[p];
+        let name = modules[i].name();
+        let prefix = cx.overlapping.then(|| line_prefix(name, width));
+        let outcome = log::with_prefix(prefix, || {
+            if compiling {
+                if many && !cx.overlapping {
+                    say!("==> {name}");
+                }
+                let b = cx.prepare(i)?;
+                let _ = built[p].set(b);
+                Ok(Done::default())
+            } else {
+                cx.finish(i, built[p].get().context("module was not prepared")?)
+            }
+        });
         if many {
-            eprintln!("==> {}", module.name());
+            outcome.with_context(|| format!("module {name}"))
+        } else {
+            outcome
         }
-        if args.cmd == Cmd::Test && !needed.contains(&i) {
-            eprintln!("  no tests here, and no module with tests depends on it: skipped");
-            test_rows.push((module.name().to_string(), vec![]));
-            continue;
-        }
-        let lock_hash = lock::fingerprint(&reactor::lock_inputs(&modules, &edges, i))?;
-        let resolved = dependencies(&args, module, &lock_hash, &repos, &loader)?;
-        let direct = resolved.iter().filter(|r| r.depth == 1).count();
-        eprintln!(
-            "  {} artifacts ({direct} direct): {}",
-            resolved.len(),
-            repos.summary()
-        );
-        let outcomes = run_module(
-            &args,
-            module,
-            &resolved,
-            test_providers.contains(&i),
-            with_tests.contains(&i),
-            &services,
-        )?;
-        test_rows.push((module.name().to_string(), outcomes));
+    })?;
+    let mut finished: Vec<Done> = layout.order.iter().map(|_| Done::default()).collect();
+    for (done, &task) in results.into_iter().zip(&layout.order) {
+        finished[task] = done;
+    }
+    let mut test_rows = vec![];
+    for (p, &i) in selected.iter().enumerate() {
+        let done = std::mem::take(&mut finished[schedule::finish_task(p)]);
+        done.stdout.iter().for_each(|l| println!("{l}"));
+        test_rows.push((modules[i].name().to_string(), done.outcomes));
+    }
+    if cx.overlapping {
+        say!("{}", repos.summary());
     }
     if many && args.cmd.runs_tests() {
         test_report(&test_rows)
@@ -406,6 +533,28 @@ mod tests {
                 "  total: 8 passed in 2 modules (4 cached); 1 modules have no tests"
             ]
         );
+    }
+
+    #[test]
+    fn tests_are_compiled_where_they_run_or_where_another_module_uses_them() {
+        assert!(compiles_tests(Cmd::Build, true, false));
+        assert!(
+            !compiles_tests(Cmd::Build, false, true),
+            "build runs nothing"
+        );
+        assert!(compiles_tests(Cmd::Test, false, true));
+        assert!(compiles_tests(Cmd::Verify, true, true));
+        assert!(
+            !compiles_tests(Cmd::Test, true, false),
+            "no sources, nothing to compile"
+        );
+        assert!(!compiles_tests(Cmd::Lock, true, true));
+    }
+
+    #[test]
+    fn line_prefixes_are_padded_to_the_longest_module_name() {
+        assert_eq!(line_prefix("core", 7), "[core   ] ");
+        assert_eq!(line_prefix("invenium", 8), "[invenium] ");
     }
 
     #[test]
