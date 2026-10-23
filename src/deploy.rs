@@ -127,6 +127,20 @@ fn content_type(path: &Path) -> &'static str {
     }
 }
 
+/// Order files for upload: POMs first (shallower depth first, e.g. root POMs before children),
+/// then binary jars, then checksum sidecars.
+fn upload_priority(p: &Path) -> (usize, usize) {
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let priority = match ext {
+        "pom" => 0,
+        "jar" | "war" => 1,
+        "sha256" | "sha1" | "md5" | "asc" => 2,
+        _ => 3,
+    };
+    let depth = p.components().count();
+    (priority, depth)
+}
+
 /// Uploads all files inside `stage_dir` to `target`.
 pub fn upload_staged(
     stage_dir: &Path,
@@ -140,6 +154,12 @@ pub fn upload_staged(
     if files.is_empty() {
         bail!("staging directory {} is empty", stage_dir.display());
     }
+
+    files.sort_by(|a, b| {
+        upload_priority(a)
+            .cmp(&upload_priority(b))
+            .then_with(|| a.cmp(b))
+    });
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -196,10 +216,9 @@ pub fn upload_staged(
             match req.send() {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
-                    if attempt < 3
-                        && (status == 429 || status == 502 || status == 503 || status == 504)
-                    {
-                        std::thread::sleep(Duration::from_millis(300 * attempt as u64));
+                    if attempt < 3 && (status == 429 || (500..=599).contains(&status)) {
+                        eprintln!("  retry {attempt}/3 for {rel_str} (HTTP {status})...");
+                        std::thread::sleep(Duration::from_millis(1000 * attempt as u64));
                         continue;
                     }
                     if resp.status().is_success() {
@@ -442,5 +461,29 @@ mod tests {
         assert!(upload_staged(&temp, &target, None, &limiter, true).is_ok());
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn upload_priority_orders_poms_before_jars_and_checksums() {
+        let mut paths = vec![
+            PathBuf::from("a/b/c/core-1.0.jar.sha256"),
+            PathBuf::from("a/b/c/core-1.0.jar"),
+            PathBuf::from("a/b/root-1.0.pom"),
+            PathBuf::from("a/b/c/core-1.0.pom"),
+        ];
+        paths.sort_by(|a, b| {
+            upload_priority(a)
+                .cmp(&upload_priority(b))
+                .then_with(|| a.cmp(b))
+        });
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("a/b/root-1.0.pom"),
+                PathBuf::from("a/b/c/core-1.0.pom"),
+                PathBuf::from("a/b/c/core-1.0.jar"),
+                PathBuf::from("a/b/c/core-1.0.jar.sha256"),
+            ]
+        );
     }
 }
