@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// One file of an artifact in a repository: its coordinates, optional classifier and extension.
@@ -52,16 +52,85 @@ pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-mod auth;
+pub(crate) mod auth;
 mod http;
 mod metadata;
 mod order;
 
-use auth::{Cred, credentials_for};
+pub(crate) use auth::{Cred, credentials_for};
 use http::{Outcome, build_proxy, classify, conditional_headers, response_validators, save_body};
 use metadata::{listed_versions, metadata_path, snapshot_dir, snapshot_rel, snapshot_value};
 pub use order::Remote;
 use order::{CENTRAL_ID, CENTRAL_URL, apply_mirror, hinted_order};
+
+pub(crate) fn host_of(url: &str) -> String {
+    let s = url.split("://").nth(1).unwrap_or(url);
+    s.split('/').next().unwrap_or(s).to_lowercase()
+}
+
+pub(crate) struct HostLimiter {
+    default_max: usize,
+    custom_limits: HashMap<String, usize>,
+    active: Mutex<HashMap<String, usize>>,
+    condvar: Condvar,
+}
+
+impl HostLimiter {
+    pub(crate) fn new(default_max: usize, custom_limits: HashMap<String, usize>) -> Self {
+        Self {
+            default_max: default_max.max(1),
+            custom_limits,
+            active: Mutex::new(HashMap::new()),
+            condvar: Condvar::new(),
+        }
+    }
+
+    fn limit_for(&self, host: &str) -> usize {
+        self.custom_limits
+            .get(host)
+            .copied()
+            .unwrap_or(self.default_max)
+            .max(1)
+    }
+
+    pub(crate) fn acquire<'a>(&'a self, host: &str) -> HostGuard<'a> {
+        let max_conns = self.limit_for(host);
+        let mut active = self.active.lock().unwrap();
+        loop {
+            let count = active.entry(host.to_string()).or_insert(0);
+            if *count < max_conns {
+                *count += 1;
+                break;
+            }
+            active = self.condvar.wait(active).unwrap();
+        }
+        HostGuard {
+            limiter: self,
+            host: host.to_string(),
+        }
+    }
+
+    fn release(&self, host: &str) {
+        let mut active = self.active.lock().unwrap();
+        if let Some(count) = active.get_mut(host)
+            && *count > 0
+        {
+            *count -= 1;
+        }
+        self.condvar.notify_all();
+    }
+}
+
+pub(crate) struct HostGuard<'a> {
+    limiter: &'a HostLimiter,
+    host: String,
+}
+
+impl<'a> Drop for HostGuard<'a> {
+    fn drop(&mut self) {
+        self.limiter.release(&self.host);
+    }
+}
 
 pub struct Repos {
     local: PathBuf,
@@ -75,6 +144,7 @@ pub struct Repos {
     auth: RwLock<HashMap<String, Arc<Cred>>>,
     allow_http_auth: HashSet<String>,
     agent: reqwest::blocking::Client,
+    host_limiter: HostLimiter,
     index: Index,
     /// Extra cache directories that are read but never written; the writable `local` is checked first.
     read_only: Vec<PathBuf>,
@@ -159,6 +229,31 @@ impl Repos {
         }
         let agent = builder.build().context("building HTTP client")?;
 
+        let default_max_per_host = std::env::var("RAYVN_MAX_PER_HOST")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .or(config.max_per_host)
+            .unwrap_or(4);
+
+        let mut custom_limits = HashMap::new();
+        for (h, mc) in &config.hosts {
+            let key = host_of(h);
+            custom_limits
+                .entry(key)
+                .and_modify(|existing: &mut usize| *existing = (*existing).min(*mc))
+                .or_insert(*mc);
+        }
+        for r in &config.repo {
+            if let Some(mc) = r.max_connections {
+                let h = host_of(&r.url);
+                custom_limits
+                    .entry(h)
+                    .and_modify(|existing: &mut usize| *existing = (*existing).min(mc))
+                    .or_insert(mc);
+            }
+        }
+        let host_limiter = HostLimiter::new(default_max_per_host, custom_limits);
+
         Ok(Repos {
             local,
             remotes: RwLock::new(remotes),
@@ -177,6 +272,7 @@ impl Repos {
             auth: RwLock::new(auth),
             allow_http_auth: config.allow_http_auth.iter().cloned().collect(),
             agent,
+            host_limiter,
             index,
             read_only,
             snapshot_ttl: config.snapshot_ttl_hours.unwrap_or(24) * 3600,
@@ -718,6 +814,7 @@ impl Repos {
         expect_sha: Option<&str>,
         held: Option<&Validators>,
     ) -> Result<Fetched> {
+        let _guard = self.host_limiter.acquire(&host_of(&r.url));
         let url = format!("{}/{rel}", r.url);
         self.requests.fetch_add(1, Ordering::Relaxed);
         let cred = self.auth.read().unwrap().get(&r.id).cloned();
@@ -981,5 +1078,35 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((loc.downloaded, loc.repo), (false, None));
+    }
+
+    #[test]
+    fn host_limiter_respects_custom_and_default_limits() {
+        let mut custom = HashMap::new();
+        custom.insert("annoying.host.com".into(), 1);
+        let limiter = HostLimiter::new(4, custom);
+        assert_eq!(limiter.limit_for("normal.host.com"), 4);
+        assert_eq!(limiter.limit_for("annoying.host.com"), 1);
+
+        let g1 = limiter.acquire("annoying.host.com");
+        assert_eq!(
+            *limiter
+                .active
+                .lock()
+                .unwrap()
+                .get("annoying.host.com")
+                .unwrap(),
+            1
+        );
+        drop(g1);
+        assert_eq!(
+            *limiter
+                .active
+                .lock()
+                .unwrap()
+                .get("annoying.host.com")
+                .unwrap(),
+            0
+        );
     }
 }

@@ -35,6 +35,7 @@ use std::time::Instant;
 
 mod build;
 mod cli;
+mod deploy;
 mod index;
 mod lock;
 mod log;
@@ -47,6 +48,7 @@ mod resolve;
 mod schedule;
 mod secret;
 mod settings;
+mod stage;
 mod testcache;
 mod verify;
 mod version;
@@ -205,6 +207,9 @@ impl Ctx<'_> {
     /// can start as soon as this is done.
     fn prepare(&self, i: usize) -> Result<Built> {
         let (args, module) = (self.args, &self.modules[i]);
+        if module.is_aggregator() {
+            return Ok(Built::default());
+        }
         if args.cmd == Cmd::Test && !self.needed.contains(&i) {
             say!("  no tests here, and no module with tests depends on it: skipped");
             return Ok(Built::default());
@@ -225,11 +230,17 @@ impl Ctx<'_> {
             resolved,
             ..Built::default()
         };
-        if matches!(args.cmd, Cmd::Build | Cmd::Test | Cmd::Verify) {
+        if matches!(
+            args.cmd,
+            Cmd::Build | Cmd::Test | Cmd::Verify | Cmd::Stage | Cmd::Deploy
+        ) {
             let (root, dir) = (&module.effective, module.dir.as_path());
+            if root.packaging == "pom" {
+                return Ok(built);
+            }
             if root.packaging != "jar" {
                 bail!(
-                    "packaging '{}' is not supported yet (only jar)",
+                    "packaging '{}' is not supported yet (only jar and pom)",
                     root.packaging
                 );
             }
@@ -257,7 +268,14 @@ impl Ctx<'_> {
             Cmd::Lock | Cmd::Fetch => {}
             Cmd::Resolve => done.stdout = resolve_lines(&built.resolved),
             Cmd::Classpath => done.stdout = vec![classpath_line(&built.resolved, args.test)],
-            Cmd::Build | Cmd::Test | Cmd::Verify => {
+            Cmd::Build | Cmd::Test | Cmd::Verify | Cmd::Stage | Cmd::Deploy => {
+                if module.is_aggregator() || root.packaging == "pom" {
+                    if matches!(args.cmd, Cmd::Build | Cmd::Stage | Cmd::Deploy) {
+                        let pom = build::package_pom(root, dir)?;
+                        done.stdout.push(pom.display().to_string());
+                    }
+                    return Ok(done);
+                }
                 let Some(main) = &built.main_classes else {
                     return Ok(done);
                 };
@@ -266,7 +284,7 @@ impl Ctx<'_> {
                     done.stdout.push(jar.display().to_string());
                     Ok(())
                 };
-                if args.cmd == Cmd::Build {
+                if matches!(args.cmd, Cmd::Build | Cmd::Stage | Cmd::Deploy) {
                     package(&mut done)?;
                     return Ok(done);
                 }
@@ -337,17 +355,26 @@ fn test_report(rows: &[(String, Vec<verify::TestOutcome>)]) -> Vec<String> {
     lines
 }
 
+fn stage_size(b: u64) -> String {
+    if b >= 1 << 20 {
+        format!("{:.1} MB", b as f64 / 1048576.0)
+    } else {
+        format!("{} KB", b / 1024)
+    }
+}
+
 /// The modules `args` acts on, in build order, aggregators left out. Commands that only read dependencies
 /// (`lock`, `fetch`, `resolve`, `classpath`) take just the module named with `-m`; the others also build what it needs.
 fn pick(args: &Args, modules: &[reactor::Module]) -> Result<Vec<usize>> {
-    let only_named = args.cmd.reads_dependencies_only();
+    let only_named = args.cmd.reads_dependencies_only() || args.only;
     let chosen = match (&args.module, only_named) {
         (Some(m), true) => vec![reactor::find(modules, m)?],
         (m, _) => reactor::select(modules, m.as_deref())?,
     };
+    let builds_or_stages = matches!(args.cmd, Cmd::Build | Cmd::Stage | Cmd::Deploy);
     let chosen: Vec<usize> = chosen
         .into_iter()
-        .filter(|&i| !modules[i].is_aggregator())
+        .filter(|&i| builds_or_stages || !modules[i].is_aggregator())
         .collect();
     if chosen.is_empty() {
         bail!(
@@ -509,6 +536,52 @@ fn run() -> Result<()> {
             .iter()
             .for_each(|l| eprintln!("{l}"));
     }
+    if matches!(args.cmd, Cmd::Stage | Cmd::Deploy) {
+        let stage_dir = args
+            .stage_dir
+            .clone()
+            .unwrap_or_else(|| project_dir.join("target/staging"));
+        eprintln!("rvn: staging artifacts into {}", stage_dir.display());
+        let mut all_staged = vec![];
+        for &i in &selected {
+            let m = &modules[i];
+            let staged = stage::stage_module(&m.effective, &m.dir, &stage_dir)?;
+            all_staged.extend(staged);
+        }
+        let total_size: u64 = all_staged.iter().map(|s| s.size).sum();
+        eprintln!(
+            "rvn: staged {} artifacts ({}) in {}",
+            all_staged.len(),
+            stage_size(total_size),
+            stage_dir.display()
+        );
+        for s in &all_staged {
+            let rel = s.file.strip_prefix(&stage_dir).unwrap_or(&s.file);
+            eprintln!("  {}", rel.display());
+        }
+        if args.cmd == Cmd::Deploy && !args.dry_run {
+            let root_effective = &modules[selected[0]].effective;
+            let target = deploy::resolve_target_repo(&args, &config, root_effective)?;
+            let auth = deploy::resolve_deploy_auth(&target, &config, &settings)?;
+
+            let default_max_per_host = std::env::var("RAYVN_MAX_PER_HOST")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .or(config.max_per_host)
+                .unwrap_or(4);
+            let mut custom_limits = std::collections::HashMap::new();
+            for (h, mc) in &config.hosts {
+                let key = repos::host_of(h);
+                custom_limits
+                    .entry(key)
+                    .and_modify(|existing: &mut usize| *existing = (*existing).min(*mc))
+                    .or_insert(*mc);
+            }
+            let limiter = repos::HostLimiter::new(default_max_per_host, custom_limits);
+
+            deploy::upload_staged(&stage_dir, &target, auth.as_ref(), &limiter)?;
+        }
+    }
     eprintln!("done in {:?}", t0.elapsed());
     if let Some(d) = cold_dir {
         let _ = std::fs::remove_dir_all(d);
@@ -565,6 +638,7 @@ mod tests {
     fn unrun_plugins_produce_one_warning_each_naming_the_module() {
         let mut e = model::Effective {
             gav: pom::Gav::new("g", "mod", "1"),
+            parent: None,
             packaging: "jar".into(),
             props: Default::default(),
             managed: Default::default(),
@@ -575,6 +649,7 @@ mod tests {
             surefire: None,
             failsafe: None,
             relocation: None,
+            distribution: None,
             unrun: vec!["exec-maven-plugin (exec at generate-sources)".into()],
         };
         let w = unrun_warnings(&e);

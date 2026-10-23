@@ -196,6 +196,12 @@ pub fn dependency_edges(modules: &[Module]) -> Vec<Vec<usize>> {
                 })
                 .filter(|&j| j != i)
                 .collect();
+            if let Some(parent_gav) = &m.effective.parent
+                && let Some(&p) = index.get(parent_gav)
+                && p != i
+            {
+                deps.push(p);
+            }
             deps.sort_unstable();
             deps.dedup();
             deps
@@ -377,6 +383,7 @@ mod tests {
             modules: children.iter().map(|c| c.to_string()).collect(),
             effective: Effective {
                 gav: Gav::new("g", artifact, "1"),
+                parent: None,
                 packaging: packaging.into(),
                 props: Default::default(),
                 managed: Default::default(),
@@ -388,6 +395,7 @@ mod tests {
                 surefire: None,
                 failsafe: None,
                 relocation: None,
+                distribution: None,
             },
         }
     }
@@ -508,6 +516,17 @@ mod tests {
         assert!(module("root", &[], "pom", &["a"]).is_aggregator());
         assert!(!module("bom", &[], "pom", &[]).is_aggregator());
         assert!(!module("a", &[], "jar", &[]).is_aggregator());
+    }
+
+    #[test]
+    fn child_module_depends_on_workspace_parent() {
+        let parent = module("root", &[], "pom", &["child"]);
+        let mut child = module("child", &[], "jar", &[]);
+        child.effective.parent = Some(parent.gav().clone());
+        let ms = vec![parent, child];
+        let edges = dependency_edges(&ms);
+        assert_eq!(edges[0], Vec::<usize>::new());
+        assert_eq!(edges[1], vec![0]);
     }
 
     #[test]

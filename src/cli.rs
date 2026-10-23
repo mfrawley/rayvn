@@ -79,6 +79,16 @@ enum Command {
     /// Run the tests, package, then run the integration tests (failsafe settings)
     #[command(after_help = "See docs/testing.md.")]
     Verify(TestOpts),
+    /// Stage built artifacts and checksums into a Maven repository layout in target/staging/
+    #[command(
+        after_help = "Example:\n  rvn stage    stages all built artifacts into target/staging/"
+    )]
+    Stage(StageOpts),
+    /// Stage artifacts and publish them to a remote repository
+    #[command(
+        after_help = "Example:\n  rvn deploy --dry-run    build and stage all artifacts without uploading"
+    )]
+    Deploy(DeployOpts),
 }
 
 /// Flags every command takes.
@@ -93,8 +103,14 @@ struct Common {
     )]
     pom: PathBuf,
     /// Multi-module: this module and what it depends on (just this one for lock, fetch, resolve, classpath)
-    #[arg(short = 'm', long, value_name = "MODULE")]
+    #[arg(short = 'm', long, alias = "projects", value_name = "MODULE")]
     module: Option<String>,
+    /// Build only the selected module, without upstream dependencies
+    #[arg(long)]
+    only: bool,
+    /// Also make upstream dependencies (Maven compatibility alias, enabled by default)
+    #[arg(short = 'a', long = "also-make", alias = "am")]
+    also_make: bool,
     /// Fail if rayvn.lock is missing or stale, instead of resolving
     #[arg(long)]
     locked: bool,
@@ -140,6 +156,30 @@ struct TestOpts {
     reports_dir: Option<String>,
 }
 
+#[derive(ClapArgs, Debug)]
+struct StageOpts {
+    #[command(flatten)]
+    parallel: Parallel,
+    /// Directory to stage artifacts into (default: target/staging)
+    #[arg(long, value_name = "DIR")]
+    stage_dir: Option<PathBuf>,
+}
+
+#[derive(ClapArgs, Debug)]
+struct DeployOpts {
+    #[command(flatten)]
+    parallel: Parallel,
+    /// Directory to stage artifacts into (default: target/staging)
+    #[arg(long, value_name = "DIR")]
+    stage_dir: Option<PathBuf>,
+    /// Build and stage all artifacts locally, but do not upload to the remote repository
+    #[arg(long)]
+    dry_run: bool,
+    /// Target repository to deploy to, e.g. "github::https://maven.pkg.github.com/org/repo"
+    #[arg(long, value_name = "REPO")]
+    alt_repo: Option<String>,
+}
+
 /// The commands, as the rest of the program names them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmd {
@@ -150,6 +190,8 @@ pub enum Cmd {
     Build,
     Test,
     Verify,
+    Stage,
+    Deploy,
 }
 
 impl Cmd {
@@ -162,6 +204,8 @@ impl Cmd {
             Cmd::Build => "build",
             Cmd::Test => "test",
             Cmd::Verify => "verify",
+            Cmd::Stage => "stage",
+            Cmd::Deploy => "deploy",
         }
     }
 
@@ -192,6 +236,10 @@ pub struct Args {
     pub test_cache: Option<String>,
     pub reports_dir: Option<String>,
     pub module: Option<String>,
+    pub only: bool,
+    pub stage_dir: Option<PathBuf>,
+    pub dry_run: bool,
+    pub alt_repo: Option<String>,
     /// `-j`; `None` means one per CPU.
     pub jobs: Option<usize>,
 }
@@ -199,12 +247,15 @@ pub struct Args {
 impl Args {
     /// Parses the process arguments; `--help`, `--version` and usage errors print and exit here.
     pub fn from_env() -> Result<Args> {
-        Args::from_cli(Cli::parse())
+        let args = normalize_args(std::env::args());
+        Args::from_cli(Cli::parse_from(args))
     }
 
     #[cfg(test)]
     fn parse(args: &[&str]) -> Result<Args> {
-        let cli = Cli::try_parse_from(std::iter::once("rvn").chain(args.iter().copied()))?;
+        let raw = std::iter::once("rvn").chain(args.iter().copied());
+        let normalized = normalize_args(raw.map(String::from));
+        let cli = Cli::try_parse_from(normalized)?;
         Args::from_cli(cli)
     }
 
@@ -220,6 +271,10 @@ impl Args {
             test_cache: None,
             reports_dir: None,
             module: c.module,
+            only: c.only,
+            stage_dir: None,
+            dry_run: false,
+            alt_repo: None,
             jobs: None,
         };
         let with_jobs = |cmd: Cmd, p: Parallel| Args {
@@ -237,6 +292,16 @@ impl Args {
             Command::Build(p) => with_jobs(Cmd::Build, p),
             Command::Test(o) => test_args(Cmd::Test, o, with_jobs),
             Command::Verify(o) => test_args(Cmd::Verify, o, with_jobs),
+            Command::Stage(s) => Args {
+                stage_dir: s.stage_dir,
+                ..with_jobs(Cmd::Stage, s.parallel)
+            },
+            Command::Deploy(d) => Args {
+                stage_dir: d.stage_dir,
+                dry_run: d.dry_run,
+                alt_repo: d.alt_repo,
+                ..with_jobs(Cmd::Deploy, d.parallel)
+            },
         };
         if args.cold && args.cmd == Cmd::Classpath {
             bail!(
@@ -253,6 +318,22 @@ impl Args {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
     }
+}
+
+fn normalize_args(iter: impl IntoIterator<Item = String>) -> Vec<String> {
+    iter.into_iter()
+        .map(|s| {
+            if s == "-pl" {
+                "--projects".to_string()
+            } else if let Some(rest) = s.strip_prefix("-pl=") {
+                format!("--projects={rest}")
+            } else if s == "-am" || s == "-amd" {
+                "--also-make".to_string()
+            } else {
+                s
+            }
+        })
+        .collect()
 }
 
 fn test_args(cmd: Cmd, o: TestOpts, with_jobs: impl Fn(Cmd, Parallel) -> Args) -> Args {
@@ -372,8 +453,40 @@ mod tests {
             parse(&["test", "--module", "core"]).module.as_deref(),
             Some("core")
         );
+        assert_eq!(
+            parse(&["test", "-pl", "core"]).module.as_deref(),
+            Some("core")
+        );
+        assert_eq!(
+            parse(&["test", "--projects", "core"]).module.as_deref(),
+            Some("core")
+        );
         assert_eq!(parse(&["test"]).module, None);
         assert!(Args::parse(&["test", "-m"]).is_err());
+    }
+
+    #[test]
+    fn projects_selection_flags_parse() {
+        let a = parse(&["build", "-pl", "core", "--only", "-am"]);
+        assert_eq!(a.module.as_deref(), Some("core"));
+        assert!(a.only);
+    }
+
+    #[test]
+    fn stage_and_deploy_options_parse() {
+        let s = parse(&["stage", "--stage-dir", "out/staging"]);
+        assert_eq!(s.cmd, Cmd::Stage);
+        assert_eq!(s.stage_dir, Some(PathBuf::from("out/staging")));
+
+        let d = parse(&[
+            "deploy",
+            "--dry-run",
+            "--alt-repo",
+            "gh::https://example.com/repo",
+        ]);
+        assert_eq!(d.cmd, Cmd::Deploy);
+        assert!(d.dry_run);
+        assert_eq!(d.alt_repo.as_deref(), Some("gh::https://example.com/repo"));
     }
 
     #[test]
@@ -405,6 +518,8 @@ mod tests {
             "build",
             "test",
             "verify",
+            "stage",
+            "deploy",
         ] {
             assert!(h.contains(c), "help does not mention `{c}`:\n{h}");
         }

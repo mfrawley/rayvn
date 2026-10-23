@@ -16,7 +16,9 @@ pub struct Effective {
     /// `groupId:artifactId:version`; group and version fall back to the parent's when omitted
     /// ([inheritance](https://maven.apache.org/guides/introduction/introduction-to-the-pom.html#project-inheritance)).
     pub gav: Gav,
-    /// `<packaging>`; rayvn builds `jar` only. [Lifecycle bindings](https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html#packaging)
+    /// Coordinates of the `<parent>` POM, if one was declared.
+    pub parent: Option<Gav>,
+    /// `<packaging>`; rayvn builds `jar` and `pom`. [Lifecycle bindings](https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html#packaging)
     pub packaging: String,
     /// `<properties>` of the chain (child wins) plus built-ins such as `project.version`, for `${...}` interpolation.
     /// [Properties](https://maven.apache.org/guides/introduction/introduction-to-the-pom.html#using-properties)
@@ -40,6 +42,8 @@ pub struct Effective {
     pub failsafe: Option<pom::TestCfg>,
     /// The POM's own `<relocation>`: the artifact now lives elsewhere and dependents must use that instead.
     pub relocation: Option<pom::Relocation>,
+    /// `<distributionManagement>` repositories for deployment (inherited from parent).
+    pub distribution: Option<pom::DistributionManagement>,
     /// Plugin executions rayvn does not run, from this POM and its parents (see `pom::RawPom::unrun`).
     pub unrun: Vec<String>,
 }
@@ -206,8 +210,10 @@ impl<'a> Loader<'a> {
                 .unwrap_or_default(),
             raw.unrun,
         );
+        let parent_gav = raw.parent.as_ref().map(|p| p.gav.clone());
         Ok(Effective {
             gav,
+            parent: parent_gav,
             packaging: raw.packaging,
             props,
             managed,
@@ -218,6 +224,9 @@ impl<'a> Loader<'a> {
             surefire,
             failsafe,
             relocation: raw.relocation,
+            distribution: raw
+                .distribution
+                .or_else(|| parent.and_then(|p| p.distribution.clone())),
             unrun,
         })
     }
@@ -454,6 +463,7 @@ mod tests {
     fn effective(gav: Gav, props: &[(&str, &str)], deps: Vec<Dep>) -> Effective {
         Effective {
             gav,
+            parent: None,
             packaging: "jar".into(),
             props: props
                 .iter()
@@ -468,6 +478,7 @@ mod tests {
             surefire: None,
             failsafe: None,
             relocation: None,
+            distribution: None,
         }
     }
 

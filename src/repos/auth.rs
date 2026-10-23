@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// rayvn.toml wins over settings.xml `<server>`.
-pub(super) fn credentials_for(
+pub(crate) fn credentials_for(
     id: &str,
     config_repos: &[crate::settings::RepoCfg],
     servers: &HashMap<String, (String, String)>,
@@ -37,7 +37,7 @@ pub(super) fn credentials_for(
     Ok(None)
 }
 
-pub(super) fn basic(user: &str, pass: &str) -> Secret {
+pub(crate) fn basic(user: &str, pass: &str) -> Secret {
     Secret::new(format!(
         "Basic {}",
         STANDARD.encode(format!("{user}:{pass}"))
@@ -45,20 +45,20 @@ pub(super) fn basic(user: &str, pass: &str) -> Secret {
 }
 
 /// A credential produced on first use (once per process), so cached or locked runs never need it.
-pub(super) struct Cred {
+pub(crate) struct Cred {
     init: Box<dyn Fn() -> Result<Secret> + Send + Sync>,
     cell: OnceLock<std::result::Result<Secret, String>>,
 }
 
 impl Cred {
-    pub(super) fn new(f: impl Fn() -> Result<Secret> + Send + Sync + 'static) -> Self {
+    pub(crate) fn new(f: impl Fn() -> Result<Secret> + Send + Sync + 'static) -> Self {
         Cred {
             init: Box::new(f),
             cell: OnceLock::new(),
         }
     }
 
-    pub(super) fn get(&self, repo: &str) -> Result<&Secret> {
+    pub(crate) fn get(&self, repo: &str) -> Result<&Secret> {
         self.cell
             .get_or_init(|| (self.init)().map_err(|e| format!("repository '{repo}': {e:#}")))
             .as_ref()
@@ -201,6 +201,7 @@ mod tests {
             token_cmd: None,
             password_cmd: None,
             user: None,
+            max_connections: None,
         };
         f(&mut c);
         c

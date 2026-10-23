@@ -25,12 +25,19 @@ rvn <command> [-f pom.xml] [-m module] [-j N] [--locked] [--refresh] [--cold]
 | `build` | Compile and package the jar into `target/`; shaded if the POM configures `maven-shade-plugin`. Prints the jar path on stdout. |
 | `test` | Compile the tests and run the unit tests (surefire settings), skipping the run when nothing changed. Writes JUnit XML to `target/surefire-reports/`. See `docs/testing.md`. |
 | `verify` | `test`, then package, then the integration tests (failsafe settings). |
+| `stage` | Build and stage all artifacts and checksums (`.sha256`, `.sha1`, `.md5`) into `target/staging/` in Maven repository layout. |
+| `deploy` | Build and stage artifacts locally, then upload them via HTTP PUT to a remote Maven repository. |
 
 | Flag | Meaning |
 |---|---|
 | `-f <path>` | Use this POM instead of `./pom.xml`. The lockfile goes beside it. |
-| `-m <module>` | Multi-module: this module and what it depends on (only this one for `lock`, `fetch`, `resolve`, `classpath`). See `docs/workspace.md`. |
-| `-j <N>`, `--jobs <N>` | `lock`, `fetch`, `build`, `test`, `verify`: work on up to N modules at once (default: one per CPU). A module starts when the modules it depends on are compiled. `-j 1` goes one after another. See `docs/workspace.md`. |
+| `-m <module>`, `-pl <module>` | Multi-module: this module and what it depends on (only this one for `lock`, `fetch`, `resolve`, `classpath`). See `docs/workspace.md`. |
+| `--only` | Build only the selected module, without compiling upstream siblings. |
+| `-am`, `--also-make` | Also build upstream dependencies (default behavior; alias for Maven compatibility). |
+| `-j <N>`, `--jobs <N>` | `lock`, `fetch`, `build`, `test`, `verify`, `stage`, `deploy`: work on up to N modules at once (default: one per CPU). A module starts when the modules it depends on are compiled. `-j 1` goes one after another. See `docs/workspace.md`. |
+| `--stage-dir <dir>` | `stage`/`deploy`: directory to stage artifacts into (default: `target/staging`). |
+| `--dry-run` | `deploy`: build and stage all artifacts locally without uploading. |
+| `--alt-repo <id::url>` | `deploy`: publish to this repository instead of POM `<distributionManagement>`. |
 | `--locked` | Fail if `rayvn.lock` is missing or stale, instead of resolving. |
 | `--refresh` | Ignore `rayvn.lock` and the miss cache for this run; the lock is rewritten. |
 | `--test-cache <dir>` | `test`/`verify`: store test results here (also `RAYVN_TEST_CACHE`, `[test] cache_dir`). |
@@ -49,6 +56,9 @@ rvn build --locked                # CI: fail rather than re-resolve
 rvn test                          # compile src/test/java, run surefire-selected JUnit 5 tests
 rvn verify                        # test, package, then run failsafe-selected integration tests
 rvn build -j 4                    # a multi-module build, four modules at a time
+rvn stage                         # stage all artifacts + checksums into target/staging
+rvn deploy --dry-run              # verify full local staging without uploading
+rvn deploy --alt-repo my-repo::https://repo.example.com/releases
 rvn test --rerun                  # run the tests even if their inputs are unchanged
 rvn resolve | grep guava          # which version of guava did we get?
 java -cp "$(rvn classpath):target/classes" app.Main
@@ -56,7 +66,7 @@ rvn lock --cold                   # time a resolve from an empty cache
 rvn --version                     # commit, build time and name of this binary
 ```
 
-Environment: `RAYVN_LOCAL_REPO` (cache location), `RAYVN_RO_REPO` (read-only cache layers), `RAYVN_DEBUG_HTTP=1` (print each request and status), `RAYVN_NO_BANNER=1` (hide the banner), `RAYVN_TEST_CACHE` (where test results are stored). Routing and credentials: `docs/routing.md`, `docs/credentials.md`.
+Environment: `RAYVN_LOCAL_REPO` (cache location), `RAYVN_RO_REPO` (read-only cache layers), `RAYVN_MAX_PER_HOST` (concurrency limit per host, default 4), `RAYVN_DEPLOY_USER`/`RAYVN_DEPLOY_PASSWORD` (deploy credentials), `RAYVN_DEBUG_HTTP=1` (print each request and status), `RAYVN_NO_BANNER=1` (hide the banner), `RAYVN_TEST_CACHE` (where test results are stored). Routing and credentials: `docs/routing.md`, `docs/credentials.md`.
 
 ## Development
 

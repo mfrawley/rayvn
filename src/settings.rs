@@ -243,15 +243,35 @@ pub struct Config {
     /// How often a SNAPSHOT that rayvn downloaded is revalidated, in hours (default 24; 0 = every run).
     #[serde(default)]
     pub snapshot_ttl_hours: Option<u64>,
+    /// Default max concurrent HTTP requests to a single host (default 4).
+    #[serde(default)]
+    pub max_per_host: Option<usize>,
+    /// Per-host max concurrent HTTP requests, e.g. `[hosts]\n"repo.maven.apache.org" = 2`.
+    #[serde(default)]
+    pub hosts: HashMap<String, usize>,
     /// `[test]`: caching and sharding of `rvn test` / `rvn verify`.
     #[serde(default)]
     pub test: TestSettings,
     /// `[workspace]`: which modules a multi-module build includes.
     #[serde(default)]
     pub workspace: WorkspaceSettings,
+    /// `[deploy]`: default repository target and credentials for `rvn deploy`.
+    #[serde(default)]
+    pub deploy: Option<DeployCfg>,
     /// Extra cache directories that are read but never written (also `RAYVN_RO_REPO`, `:`-separated).
     #[serde(default)]
     pub read_only_repos: Vec<String>,
+}
+
+/// `[deploy]` in `rayvn.toml`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+pub struct DeployCfg {
+    pub id: Option<String>,
+    pub url: Option<String>,
+    pub user_env: Option<String>,
+    pub password_env: Option<String>,
+    pub token_env: Option<String>,
+    pub user: Option<String>,
 }
 
 /// `[workspace]` in `rayvn.toml`.
@@ -305,6 +325,8 @@ pub struct RepoCfg {
     pub password_cmd: Option<Vec<String>>,
     /// Literal username for `password_cmd` (not a secret).
     pub user: Option<String>,
+    /// Max concurrent connections to this repository host.
+    pub max_connections: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -405,6 +427,8 @@ pub fn load_config(project_dir: &Path) -> Result<(Config, Vec<PathBuf>)> {
             cfg.read_only_repos.extend(c.read_only_repos);
             cfg.repo.extend(c.repo);
             cfg.allow_http_auth.extend(c.allow_http_auth);
+            cfg.hosts.extend(c.hosts);
+            cfg.deploy = cfg.deploy.or(c.deploy);
             inputs.push(p);
         }
     }
@@ -463,5 +487,16 @@ mod tests {
             (None, Some(true), Some(4))
         );
         assert_eq!(c.test.inputs, ["test/input/**"]);
+    }
+
+    #[test]
+    fn host_limits_parse_from_toml() {
+        let c: Config = toml::from_str(
+            "max_per_host = 8\n\n[hosts]\n\"repo.maven.apache.org\" = 2\n\"annoying.host.com\" = 1\n",
+        )
+        .unwrap();
+        assert_eq!(c.max_per_host, Some(8));
+        assert_eq!(c.hosts.get("repo.maven.apache.org"), Some(&2));
+        assert_eq!(c.hosts.get("annoying.host.com"), Some(&1));
     }
 }

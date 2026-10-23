@@ -93,10 +93,17 @@ pub struct Relocation {
     pub version: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoDecl {
     pub id: String,
     pub url: String,
+}
+
+/// `<distributionManagement>` repository and snapshotRepository targets.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DistributionManagement {
+    pub repository: Option<RepoDecl>,
+    pub snapshot_repository: Option<RepoDecl>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -112,6 +119,7 @@ pub struct RawPom {
     pub repos: Vec<RepoDecl>,
     pub modules: Vec<String>,
     pub relocation: Option<Relocation>,
+    pub distribution: Option<DistributionManagement>,
     profiles: Vec<Profile>,
     pub shade: Option<ShadeCfg>,
     /// `maven-compiler-plugin` configuration.
@@ -705,6 +713,20 @@ fn parse_raw(xml: &str) -> Result<RawPom> {
                 artifact: text(r, "artifactId"),
                 version: text(r, "version"),
             }),
+        distribution: child(root, "distributionManagement").map(|d| {
+            let parse_repo = |tag| {
+                child(d, tag).and_then(|r| {
+                    Some(RepoDecl {
+                        id: text(r, "id")?,
+                        url: text(r, "url")?,
+                    })
+                })
+            };
+            DistributionManagement {
+                repository: parse_repo("repository"),
+                snapshot_repository: parse_repo("snapshotRepository"),
+            }
+        }),
         shade: parse_shade(root),
         compiler: parse_compiler(root),
         surefire: parse_tests(root, "maven-surefire-plugin"),

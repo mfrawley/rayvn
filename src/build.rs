@@ -74,6 +74,11 @@ pub fn package(
     resolved: &[Resolved],
 ) -> Result<PathBuf> {
     let target = dir.join("target");
+    let pom_dest = target.join(format!("{}-{}.pom", root.gav.artifact, root.gav.version));
+    let source_pom = dir.join("pom.xml");
+    if source_pom.is_file() {
+        let _ = std::fs::copy(&source_pom, &pom_dest);
+    }
     let jar_path = target.join(format!("{}-{}.jar", root.gav.artifact, root.gav.version));
     write_jar(classes, &jar_path)?;
     say!("  packaged {} ({})", jar_path.display(), size(&jar_path));
@@ -93,6 +98,23 @@ pub fn package(
         }
     }
     Ok(result)
+}
+
+/// Packages a `pom`-packaged module (e.g. an aggregator or parent POM) by writing `target/<artifact>-<version>.pom`.
+pub fn package_pom(root: &Effective, dir: &Path) -> Result<PathBuf> {
+    let target = dir.join("target");
+    std::fs::create_dir_all(&target).with_context(|| format!("creating {}", target.display()))?;
+    let pom_dest = target.join(format!("{}-{}.pom", root.gav.artifact, root.gav.version));
+    let source_pom = dir.join("pom.xml");
+    if source_pom.is_file() {
+        std::fs::copy(&source_pom, &pom_dest).with_context(|| {
+            format!("copying {} to {}", source_pom.display(), pom_dest.display())
+        })?;
+    } else {
+        std::fs::write(&pom_dest, "").with_context(|| format!("writing {}", pom_dest.display()))?;
+    }
+    say!("  packaged {} ({})", pom_dest.display(), size(&pom_dest));
+    Ok(pom_dest)
 }
 
 /// Where `maven-shade-plugin` puts the shaded jar: `<finalName>.jar` when configured, else
@@ -728,6 +750,7 @@ mod tests {
         let opt = |s: &str| (!s.is_empty()).then(|| s.to_string());
         let e = Effective {
             gav: crate::pom::Gav::new("g", "a", "1"),
+            parent: None,
             packaging: "jar".into(),
             props: props
                 .iter()
@@ -745,6 +768,7 @@ mod tests {
             surefire: None,
             failsafe: None,
             relocation: None,
+            distribution: None,
             unrun: vec![],
         };
         JavaLevel::of(&e)
@@ -827,5 +851,33 @@ mod tests {
                 "A.java"
             ]
         );
+    }
+
+    #[test]
+    fn package_pom_writes_pom_artifact() {
+        let temp = std::env::temp_dir().join(format!("rvn-pom-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join("pom.xml"), "<project/>").unwrap();
+        let eff = Effective {
+            gav: crate::pom::Gav::new("com.example", "root", "1.0.0"),
+            parent: None,
+            packaging: "pom".into(),
+            props: Default::default(),
+            managed: Default::default(),
+            deps: vec![],
+            repos: vec![],
+            shade: None,
+            compiler: None,
+            unrun: vec![],
+            surefire: None,
+            failsafe: None,
+            relocation: None,
+            distribution: None,
+        };
+        let out = package_pom(&eff, &temp).unwrap();
+        assert_eq!(out, temp.join("target/root-1.0.0.pom"));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "<project/>");
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

@@ -9,15 +9,16 @@ A POM that lists `<modules>` makes a workspace. Run `rvn` at the root, or with `
 
 | Command | Does |
 |---|---|
-| `rvn build` / `test` / `verify` | Every module, in dependency order. |
-| `... -m app` (`--module`) | `app` and the modules it depends on. `-m g:app` if two modules share an artifactId. |
+| `rvn build` / `test` / `verify` / `stage` / `deploy` | Every module, in dependency order. |
+| `... -m app`, `-pl app` (`--projects`) | `app` and the upstream modules it depends on (`-am` by default). `-m g:app` if two modules share an artifactId. |
+| `... -pl app --only` | Strictly `app` only, without compiling upstream sibling modules. |
 | `lock` / `fetch` / `resolve` / `classpath` with `-m app` | Only `app`. `classpath` needs `-m` when there are several modules. |
 
 ## What it does
 
-- **Order.** Module A before module B when B declares a dependency on A. The match is on exact `groupId:artifactId:version`, with `<dependencyManagement>` applied, so a dependency on another version is an ordinary download. Modules with no constraint between them keep their `<modules>` order. A cycle is an error naming the modules.
+- **Order.** Module A before module B when B declares a dependency on A, or when B's `<parent>` is A. The match is on exact `groupId:artifactId:version`, with `<dependencyManagement>` applied, so a dependency on another version is an ordinary download. Modules with no constraint between them keep their `<modules>` order. A cycle is an error naming the modules.
 - **Siblings are not downloaded.** A dependency on a module is its `target/classes` (its `test-jar` is `target/test-classes`), read from disk. A shaded jar packs those classes into the fat jar like any other dependency. Because the build output stands in for the jar, a module whose test classes are used by another is compiled (tests included) even under `rvn build -m`.
-- **Aggregators.** A `pom`-packaged module that lists modules builds nothing.
+- **Aggregators.** A `pom`-packaged module that lists modules packages its POM to `target/<artifact>-<version>.pom` (with checksums) during `rvn build`, `rvn stage`, and `rvn deploy`. Aggregators have no code or unit tests, and require no `rayvn.lock`.
 - **One lock per module**, `<module>/rayvn.lock`, no root lock. A sibling is recorded as `workspace = true` with no checksum. A module's lock goes stale when the POMs of the module, its parents on disk, or any module it depends on (directly or not) change; a change elsewhere leaves it alone.
 - **The test cache** hashes a sibling by its class tree, so editing `core` re-runs `app`'s tests.
 - **`rvn test` / `rvn verify` at the root** run each module's tests in build order, from the module's own directory (classpath entries are absolute, so this works however the POM was named). A module without test sources is skipped. A failing module stops the run. The run ends with a table, for example:

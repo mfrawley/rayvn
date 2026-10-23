@@ -578,6 +578,7 @@ mod tests {
     fn skip_settings_are_interpolated() {
         let root = Effective {
             gav: crate::pom::Gav::new("g", "a", "1"),
+            parent: None,
             packaging: "jar".into(),
             props: [("skipITs".to_string(), "true".to_string())].into(),
             managed: Default::default(),
@@ -589,6 +590,7 @@ mod tests {
             surefire: None,
             failsafe: None,
             relocation: None,
+            distribution: None,
         };
         assert!(skipped(
             &TestCfg {
@@ -692,6 +694,7 @@ mod tests {
     fn root_with(props: &[(&str, &str)]) -> Effective {
         Effective {
             gav: crate::pom::Gav::new("g", "a", "1"),
+            parent: None,
             packaging: "jar".into(),
             props: props
                 .iter()
@@ -706,6 +709,7 @@ mod tests {
             surefire: None,
             failsafe: None,
             relocation: None,
+            distribution: None,
         }
     }
 
