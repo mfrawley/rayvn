@@ -133,17 +133,16 @@ pub fn stage_module(
         }
         staged.push(stage_file(&jar_file, &dest_dir)?);
 
-        // Check for attached shaded jar if configured
-        if let Some(shade) = &effective.shade
-            && shade.attached
-        {
-            let classifier = shade.classifier.as_deref().unwrap_or("shaded");
-            let shaded_name = format!(
-                "{}-{}-{classifier}.jar",
-                effective.gav.artifact, effective.gav.version
+        // Check for attached or finalName shaded jar if configured
+        if let Some(shade) = &effective.shade {
+            let shaded_file = crate::build::shaded_path(
+                shade,
+                &target,
+                &effective.gav.artifact,
+                &effective.gav.version,
+                &effective.props,
             );
-            let shaded_file = target.join(&shaded_name);
-            if shaded_file.is_file() {
+            if shaded_file.is_file() && shaded_file != jar_file {
                 staged.push(stage_file(&shaded_file, &dest_dir)?);
             }
         }
@@ -195,5 +194,62 @@ mod tests {
             gav_rel_dir(&gav),
             PathBuf::from("io/moia/transport/core/1.2.3")
         );
+    }
+
+    #[test]
+    fn stage_module_stages_shaded_fat_jar() {
+        use std::collections::BTreeMap;
+        let temp = std::env::temp_dir().join(format!("rvn-stage-fat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let target = temp.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+
+        std::fs::write(target.join("my-app-1.0.pom"), b"<project/>").unwrap();
+        std::fs::write(target.join("my-app-1.0.jar"), b"plain jar").unwrap();
+        std::fs::write(target.join("my-app-1.0-fat.jar"), b"fat jar").unwrap();
+
+        let mut props = BTreeMap::new();
+        props.insert("artifactId".into(), "my-app".into());
+        props.insert("version".into(), "1.0".into());
+
+        let eff = Effective {
+            gav: Gav::new("com.example", "my-app", "1.0"),
+            parent: None,
+            packaging: "jar".into(),
+            props,
+            managed: Default::default(),
+            deps: vec![],
+            repos: vec![],
+            shade: Some(crate::pom::ShadeCfg {
+                final_name: Some("${artifactId}-${version}-fat".into()),
+                attached: true,
+                classifier: Some("shaded".into()),
+                ..Default::default()
+            }),
+            compiler: None,
+            surefire: None,
+            failsafe: None,
+            relocation: None,
+            distribution: None,
+            unrun: vec![],
+        };
+
+        let stage_dir = temp.join("staging");
+        let staged = stage_module(&eff, &temp, &stage_dir).unwrap();
+        let names: Vec<_> = staged
+            .iter()
+            .map(|s| s.file.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["my-app-1.0.pom", "my-app-1.0.jar", "my-app-1.0-fat.jar"]
+        );
+        assert!(
+            stage_dir
+                .join("com/example/my-app/1.0/my-app-1.0-fat.jar.sha256")
+                .is_file()
+        );
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

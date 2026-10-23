@@ -108,6 +108,9 @@ struct Common {
     /// Build only the selected module, without upstream dependencies
     #[arg(long)]
     only: bool,
+    /// Override the version of the workspace modules (like versions:set -DnewVersion=...)
+    #[arg(long = "set-version", value_name = "VERSION")]
+    set_version: Option<String>,
     /// Also make upstream dependencies (Maven compatibility alias, enabled by default)
     #[arg(short = 'a', long = "also-make", alias = "am")]
     also_make: bool,
@@ -237,6 +240,7 @@ pub struct Args {
     pub reports_dir: Option<String>,
     pub module: Option<String>,
     pub only: bool,
+    pub set_version: Option<String>,
     pub stage_dir: Option<PathBuf>,
     pub dry_run: bool,
     pub alt_repo: Option<String>,
@@ -272,6 +276,7 @@ impl Args {
             reports_dir: None,
             module: c.module,
             only: c.only,
+            set_version: c.set_version,
             stage_dir: None,
             dry_run: false,
             alt_repo: None,
@@ -467,9 +472,18 @@ mod tests {
 
     #[test]
     fn projects_selection_flags_parse() {
-        let a = parse(&["build", "-pl", "core", "--only", "-am"]);
+        let a = parse(&[
+            "build",
+            "-pl",
+            "core",
+            "--only",
+            "-am",
+            "--set-version",
+            "2.0.0",
+        ]);
         assert_eq!(a.module.as_deref(), Some("core"));
         assert!(a.only);
+        assert_eq!(a.set_version.as_deref(), Some("2.0.0"));
     }
 
     #[test]

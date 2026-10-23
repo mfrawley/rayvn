@@ -33,6 +33,7 @@ rvn <command> [-f pom.xml] [-m module] [-j N] [--locked] [--refresh] [--cold]
 | `-f <path>` | Use this POM instead of `./pom.xml`. The lockfile goes beside it. |
 | `-m <module>`, `-pl <module>` | Multi-module: this module and what it depends on (only this one for `lock`, `fetch`, `resolve`, `classpath`). See `docs/workspace.md`. |
 | `--only` | Build only the selected module, without compiling upstream siblings. |
+| `--set-version <ver>` | Override the workspace version across all modules (like `versions:set -DnewVersion=...`). |
 | `-am`, `--also-make` | Also build upstream dependencies (default behavior; alias for Maven compatibility). |
 | `-j <N>`, `--jobs <N>` | `lock`, `fetch`, `build`, `test`, `verify`, `stage`, `deploy`: work on up to N modules at once (default: one per CPU). A module starts when the modules it depends on are compiled. `-j 1` goes one after another. See `docs/workspace.md`. |
 | `--stage-dir <dir>` | `stage`/`deploy`: directory to stage artifacts into (default: `target/staging`). |
@@ -58,7 +59,7 @@ rvn verify                        # test, package, then run failsafe-selected in
 rvn build -j 4                    # a multi-module build, four modules at a time
 rvn stage                         # stage all artifacts + checksums into target/staging
 rvn deploy --dry-run              # verify full local staging without uploading
-rvn deploy --alt-repo my-repo::https://repo.example.com/releases
+rvn deploy --set-version 20261022.1 --alt-repo my-repo::https://repo.example.com/releases
 rvn test --rerun                  # run the tests even if their inputs are unchanged
 rvn resolve | grep guava          # which version of guava did we get?
 java -cp "$(rvn classpath):target/classes" app.Main

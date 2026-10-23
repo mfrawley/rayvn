@@ -269,9 +269,15 @@ impl Ctx<'_> {
             Cmd::Resolve => done.stdout = resolve_lines(&built.resolved),
             Cmd::Classpath => done.stdout = vec![classpath_line(&built.resolved, args.test)],
             Cmd::Build | Cmd::Test | Cmd::Verify | Cmd::Stage | Cmd::Deploy => {
+                let has_ws_parent = root.parent.is_some();
                 if module.is_aggregator() || root.packaging == "pom" {
                     if matches!(args.cmd, Cmd::Build | Cmd::Stage | Cmd::Deploy) {
-                        let pom = build::package_pom(root, dir)?;
+                        let pom = build::package_pom(
+                            root,
+                            dir,
+                            args.set_version.as_deref(),
+                            has_ws_parent,
+                        )?;
                         done.stdout.push(pom.display().to_string());
                     }
                     return Ok(done);
@@ -280,7 +286,14 @@ impl Ctx<'_> {
                     return Ok(done);
                 };
                 let package = |done: &mut Done| -> Result<()> {
-                    let jar = build::package(root, dir, main, &built.resolved)?;
+                    let jar = build::package(
+                        root,
+                        dir,
+                        main,
+                        &built.resolved,
+                        args.set_version.as_deref(),
+                        has_ws_parent,
+                    )?;
                     done.stdout.push(jar.display().to_string());
                     Ok(())
                 };
@@ -418,7 +431,10 @@ fn run() -> Result<()> {
         .collect();
     let repos = repos::Repos::new(&declared, &settings, &config, args.refresh, args.cold)?;
     let mut loader = model::Loader::new(&repos);
-    let modules = reactor::load(found, &loader)?;
+    let mut modules = reactor::load(found, &loader)?;
+    if let Some(new_ver) = &args.set_version {
+        reactor::apply_version_override(&mut modules, new_ver);
+    }
     for m in &modules {
         loader.register_local(m.effective.clone(), &m.dir);
     }

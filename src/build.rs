@@ -72,13 +72,11 @@ pub fn package(
     dir: &Path,
     classes: &Path,
     resolved: &[Resolved],
+    version_override: Option<&str>,
+    has_workspace_parent: bool,
 ) -> Result<PathBuf> {
     let target = dir.join("target");
-    let pom_dest = target.join(format!("{}-{}.pom", root.gav.artifact, root.gav.version));
-    let source_pom = dir.join("pom.xml");
-    if source_pom.is_file() {
-        let _ = std::fs::copy(&source_pom, &pom_dest);
-    }
+    let _ = write_pom_artifact(root, dir, version_override, has_workspace_parent)?;
     let jar_path = target.join(format!("{}-{}.jar", root.gav.artifact, root.gav.version));
     write_jar(classes, &jar_path)?;
     say!("  packaged {} ({})", jar_path.display(), size(&jar_path));
@@ -101,15 +99,36 @@ pub fn package(
 }
 
 /// Packages a `pom`-packaged module (e.g. an aggregator or parent POM) by writing `target/<artifact>-<version>.pom`.
-pub fn package_pom(root: &Effective, dir: &Path) -> Result<PathBuf> {
+pub fn package_pom(
+    root: &Effective,
+    dir: &Path,
+    version_override: Option<&str>,
+    has_workspace_parent: bool,
+) -> Result<PathBuf> {
+    write_pom_artifact(root, dir, version_override, has_workspace_parent)
+}
+
+/// Writes `target/<artifact>-<version>.pom`, updating its `<version>` tags if `version_override` is provided.
+pub fn write_pom_artifact(
+    root: &Effective,
+    dir: &Path,
+    version_override: Option<&str>,
+    has_workspace_parent: bool,
+) -> Result<PathBuf> {
     let target = dir.join("target");
     std::fs::create_dir_all(&target).with_context(|| format!("creating {}", target.display()))?;
     let pom_dest = target.join(format!("{}-{}.pom", root.gav.artifact, root.gav.version));
     let source_pom = dir.join("pom.xml");
     if source_pom.is_file() {
-        std::fs::copy(&source_pom, &pom_dest).with_context(|| {
-            format!("copying {} to {}", source_pom.display(), pom_dest.display())
-        })?;
+        let content = std::fs::read_to_string(&source_pom)
+            .with_context(|| format!("reading {}", source_pom.display()))?;
+        let output = if let Some(new_v) = version_override {
+            crate::pom::rewrite_pom_version(&content, new_v, has_workspace_parent)?
+        } else {
+            content
+        };
+        std::fs::write(&pom_dest, output)
+            .with_context(|| format!("writing {}", pom_dest.display()))?;
     } else {
         std::fs::write(&pom_dest, "").with_context(|| format!("writing {}", pom_dest.display()))?;
     }
@@ -121,7 +140,7 @@ pub fn package_pom(root: &Effective, dir: &Path) -> Result<PathBuf> {
 /// `<artifact>-<version>-<classifier>.jar` when it is attached (classifier defaults to `shaded`), else it replaces
 /// the plain jar. Checked against Maven for the first case only: shade 3.4.1 with `finalName` and an attached
 /// artifact writes `<finalName>.jar` and leaves the plain jar alone.
-fn shaded_path(
+pub fn shaded_path(
     cfg: &ShadeCfg,
     target: &Path,
     artifact: &str,
@@ -875,7 +894,7 @@ mod tests {
             relocation: None,
             distribution: None,
         };
-        let out = package_pom(&eff, &temp).unwrap();
+        let out = package_pom(&eff, &temp, None, false).unwrap();
         assert_eq!(out, temp.join("target/root-1.0.0.pom"));
         assert_eq!(std::fs::read_to_string(&out).unwrap(), "<project/>");
         let _ = std::fs::remove_dir_all(&temp);

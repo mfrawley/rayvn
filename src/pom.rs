@@ -438,6 +438,30 @@ pub fn text(n: Node, name: &str) -> Option<String> {
     child(n, name).map(node_text).filter(|s| !s.is_empty())
 }
 
+/// Rewrites `<version>` (and optionally `<parent><version>`) in `xml` using the parsed DOM.
+pub fn rewrite_pom_version(xml: &str, new_version: &str, update_parent: bool) -> Result<String> {
+    let doc = roxmltree::Document::parse(xml).context("parsing pom.xml")?;
+    let root = doc.root_element();
+    let mut replacements = Vec::new();
+
+    if let Some(v) = child(root, "version") {
+        replacements.push((v.range(), format!("<version>{new_version}</version>")));
+    }
+    if update_parent
+        && let Some(parent) = child(root, "parent")
+        && let Some(pv) = child(parent, "version")
+    {
+        replacements.push((pv.range(), format!("<version>{new_version}</version>")));
+    }
+
+    replacements.sort_by_key(|r| std::cmp::Reverse(r.0.start));
+    let mut out = xml.to_string();
+    for (range, repl) in replacements {
+        out.replace_range(range, &repl);
+    }
+    Ok(out)
+}
+
 fn parse_dep(n: Node) -> Option<Dep> {
     let exclusions = child(n, "exclusions")
         .map(|e| {
@@ -968,5 +992,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plain.relocation, None);
+    }
+
+    #[test]
+    fn rewrite_pom_version_replaces_version_tags() {
+        let xml = r#"<project>
+  <!-- project comment -->
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>root</artifactId>
+    <version>1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>core</artifactId>
+  <version>1.0-SNAPSHOT</version>
+</project>"#;
+
+        let res = rewrite_pom_version(xml, "20261022.1", true).unwrap();
+        assert!(res.contains("<version>20261022.1</version>"));
+        assert!(!res.contains("1.0-SNAPSHOT"));
+        assert!(res.contains("<!-- project comment -->"));
     }
 }

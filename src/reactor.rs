@@ -162,6 +162,38 @@ pub fn load(found: Vec<Found>, loader: &Loader) -> Result<Vec<Module>> {
     Ok(modules)
 }
 
+/// Overrides the version across all workspace modules, their properties, parent references, and sibling dependencies.
+pub fn apply_version_override(modules: &mut [Module], new_version: &str) {
+    let old_versions: HashMap<String, String> = modules
+        .iter()
+        .map(|m| (m.gav().artifact.clone(), m.gav().version.clone()))
+        .collect();
+
+    for m in modules.iter_mut() {
+        m.effective.gav.version = new_version.to_string();
+        m.effective
+            .props
+            .insert("project.version".into(), new_version.to_string());
+        m.effective
+            .props
+            .insert("version".into(), new_version.to_string());
+
+        if let Some(parent) = &mut m.effective.parent
+            && old_versions.contains_key(&parent.artifact)
+        {
+            parent.version = new_version.to_string();
+        }
+
+        for dep in &mut m.effective.deps {
+            if let Some(old_v) = old_versions.get(&dep.artifact)
+                && dep.version.as_deref() == Some(old_v.as_str())
+            {
+                dep.version = Some(new_version.to_string());
+            }
+        }
+    }
+}
+
 /// The version a dependency gets: `<dependencyManagement>` wins over the declared one, as in resolution.
 fn version_of(e: &Effective, d: &Dep) -> Option<String> {
     e.managed
@@ -527,6 +559,24 @@ mod tests {
         let edges = dependency_edges(&ms);
         assert_eq!(edges[0], Vec::<usize>::new());
         assert_eq!(edges[1], vec![0]);
+    }
+
+    #[test]
+    fn version_override_updates_modules_and_dependencies() {
+        let parent = module("root", &[], "pom", &["child"]);
+        let mut child = module("child", &[("root", "1")], "jar", &[]);
+        child.effective.parent = Some(parent.gav().clone());
+        let mut ms = vec![parent, child];
+
+        apply_version_override(&mut ms, "2026.10");
+        assert_eq!(ms[0].gav().version, "2026.10");
+        assert_eq!(ms[1].gav().version, "2026.10");
+        assert_eq!(ms[1].effective.parent.as_ref().unwrap().version, "2026.10");
+        assert_eq!(ms[1].effective.deps[0].version.as_deref(), Some("2026.10"));
+        assert_eq!(
+            ms[1].effective.props.get("project.version").unwrap(),
+            "2026.10"
+        );
     }
 
     #[test]
