@@ -381,7 +381,13 @@ fn stage_size(b: u64) -> String {
 fn pick(args: &Args, modules: &[reactor::Module]) -> Result<Vec<usize>> {
     let only_named = args.cmd.reads_dependencies_only() || args.only;
     let chosen = match (&args.module, only_named) {
-        (Some(m), true) => vec![reactor::find(modules, m)?],
+        (Some(m), true) => {
+            let mut indices = vec![];
+            for part in m.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                indices.push(reactor::find(modules, part)?);
+            }
+            indices
+        }
         (m, _) => reactor::select(modules, m.as_deref())?,
     };
     let builds_or_stages = matches!(args.cmd, Cmd::Build | Cmd::Stage | Cmd::Deploy);
@@ -557,6 +563,10 @@ fn run() -> Result<()> {
             .stage_dir
             .clone()
             .unwrap_or_else(|| project_dir.join("target/staging"));
+        if stage_dir.is_dir() {
+            let _ = std::fs::remove_dir_all(&stage_dir);
+        }
+        std::fs::create_dir_all(&stage_dir)?;
         eprintln!("rvn: staging artifacts into {}", stage_dir.display());
         let mut all_staged = vec![];
         for &i in &selected {
@@ -595,7 +605,13 @@ fn run() -> Result<()> {
             }
             let limiter = repos::HostLimiter::new(default_max_per_host, custom_limits);
 
-            deploy::upload_staged(&stage_dir, &target, auth.as_ref(), &limiter)?;
+            deploy::upload_staged(
+                &stage_dir,
+                &target,
+                auth.as_ref(),
+                &limiter,
+                args.skip_existing,
+            )?;
         }
     }
     eprintln!("done in {:?}", t0.elapsed());

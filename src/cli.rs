@@ -178,6 +178,9 @@ struct DeployOpts {
     /// Build and stage all artifacts locally, but do not upload to the remote repository
     #[arg(long)]
     dry_run: bool,
+    /// Skip artifacts that already exist on the remote repository (HTTP 409 Conflict) instead of failing
+    #[arg(long)]
+    skip_existing: bool,
     /// Target repository to deploy to, e.g. "github::https://maven.pkg.github.com/org/repo"
     #[arg(long, value_name = "REPO")]
     alt_repo: Option<String>,
@@ -243,6 +246,7 @@ pub struct Args {
     pub set_version: Option<String>,
     pub stage_dir: Option<PathBuf>,
     pub dry_run: bool,
+    pub skip_existing: bool,
     pub alt_repo: Option<String>,
     /// `-j`; `None` means one per CPU.
     pub jobs: Option<usize>,
@@ -279,6 +283,7 @@ impl Args {
             set_version: c.set_version,
             stage_dir: None,
             dry_run: false,
+            skip_existing: false,
             alt_repo: None,
             jobs: None,
         };
@@ -304,6 +309,7 @@ impl Args {
             Command::Deploy(d) => Args {
                 stage_dir: d.stage_dir,
                 dry_run: d.dry_run,
+                skip_existing: d.skip_existing,
                 alt_repo: d.alt_repo,
                 ..with_jobs(Cmd::Deploy, d.parallel)
             },
@@ -495,11 +501,13 @@ mod tests {
         let d = parse(&[
             "deploy",
             "--dry-run",
+            "--skip-existing",
             "--alt-repo",
             "gh::https://example.com/repo",
         ]);
         assert_eq!(d.cmd, Cmd::Deploy);
         assert!(d.dry_run);
+        assert!(d.skip_existing);
         assert_eq!(d.alt_repo.as_deref(), Some("gh::https://example.com/repo"));
     }
 

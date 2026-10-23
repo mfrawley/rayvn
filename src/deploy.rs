@@ -133,6 +133,7 @@ pub fn upload_staged(
     target: &TargetRepo,
     auth: Option<&Cred>,
     limiter: &HostLimiter,
+    skip_existing: bool,
 ) -> Result<()> {
     let mut files = vec![];
     crate::build::walk(stage_dir, &mut files)?;
@@ -213,10 +214,17 @@ pub fn upload_staged(
                             target.id
                         );
                     } else if status == 409 {
-                        bail!(
-                            "HTTP 409 Conflict deploying {rel_str} to {}; artifact already exists on remote repository",
-                            target.url
-                        );
+                        if skip_existing {
+                            eprintln!("  skipped {} (already exists, HTTP 409)", rel_str);
+                            last_err = None;
+                            break;
+                        } else {
+                            bail!(
+                                "HTTP 409 Conflict deploying {} to {}; artifact already exists on remote repository (use --skip-existing to ignore)",
+                                rel_str,
+                                target.url
+                            );
+                        }
                     } else {
                         bail!("HTTP {status} deploying {rel_str} to {}", target.url);
                     }
@@ -265,6 +273,7 @@ mod tests {
             set_version: None,
             stage_dir: None,
             dry_run: false,
+            skip_existing: false,
             alt_repo: Some("my-nexus::https://nexus.example.com/maven".into()),
             jobs: None,
         };
@@ -312,6 +321,7 @@ mod tests {
             set_version: None,
             stage_dir: None,
             dry_run: false,
+            skip_existing: false,
             alt_repo: None,
             jobs: None,
         };
@@ -390,10 +400,47 @@ mod tests {
             url,
         };
         let limiter = HostLimiter::new(4, HashMap::new());
-        upload_staged(&temp, &target, None, &limiter).unwrap();
+        upload_staged(&temp, &target, None, &limiter, false).unwrap();
 
         let paths = uploaded.lock().unwrap().clone();
         assert_eq!(paths, vec!["/com/example/1.0/lib-1.0.jar"]);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn upload_staged_skip_existing_ignores_409() {
+        use std::collections::HashMap;
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap_or(0);
+                let mut stream = &stream;
+                let reply =
+                    "HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+
+        let temp = std::env::temp_dir().join(format!("rvn-deploy-409-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(temp.join("com/example/1.0")).unwrap();
+        std::fs::write(temp.join("com/example/1.0/lib-1.0.jar"), b"jar bytes").unwrap();
+
+        let target = TargetRepo {
+            id: "test".into(),
+            url,
+        };
+        let limiter = HostLimiter::new(4, HashMap::new());
+        assert!(upload_staged(&temp, &target, None, &limiter, false).is_err());
+        assert!(upload_staged(&temp, &target, None, &limiter, true).is_ok());
+
         let _ = std::fs::remove_dir_all(&temp);
     }
 }

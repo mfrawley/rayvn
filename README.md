@@ -31,13 +31,14 @@ rvn <command> [-f pom.xml] [-m module] [-j N] [--locked] [--refresh] [--cold]
 | Flag | Meaning |
 |---|---|
 | `-f <path>` | Use this POM instead of `./pom.xml`. The lockfile goes beside it. |
-| `-m <module>`, `-pl <module>` | Multi-module: this module and what it depends on (only this one for `lock`, `fetch`, `resolve`, `classpath`). See `docs/workspace.md`. |
+| `-m <module>`, `-pl <modules>` | Multi-module: this module or comma-separated list of modules and what they depend on. See `docs/workspace.md`. |
 | `--only` | Build only the selected module, without compiling upstream siblings. |
 | `--set-version <ver>` | Override the workspace version across all modules (like `versions:set -DnewVersion=...`). |
 | `-am`, `--also-make` | Also build upstream dependencies (default behavior; alias for Maven compatibility). |
 | `-j <N>`, `--jobs <N>` | `lock`, `fetch`, `build`, `test`, `verify`, `stage`, `deploy`: work on up to N modules at once (default: one per CPU). A module starts when the modules it depends on are compiled. `-j 1` goes one after another. See `docs/workspace.md`. |
 | `--stage-dir <dir>` | `stage`/`deploy`: directory to stage artifacts into (default: `target/staging`). |
 | `--dry-run` | `deploy`: build and stage all artifacts locally without uploading. |
+| `--skip-existing` | `deploy`: skip files that already exist on the remote repository (HTTP 409 Conflict) instead of failing. |
 | `--alt-repo <id::url>` | `deploy`: publish to this repository instead of POM `<distributionManagement>`. |
 | `--locked` | Fail if `rayvn.lock` is missing or stale, instead of resolving. |
 | `--refresh` | Ignore `rayvn.lock` and the miss cache for this run; the lock is rewritten. |

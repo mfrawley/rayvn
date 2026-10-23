@@ -321,9 +321,16 @@ fn reach(deps: &[Vec<usize>], start: usize) -> HashSet<usize> {
     wanted
 }
 
-/// `start` and every module it depends on, in the order of `order`.
-pub fn closure(order: &[usize], deps: &[Vec<usize>], start: usize) -> Vec<usize> {
-    let wanted = reach(deps, start);
+/// The given modules and every module they depend on, in topological build order.
+pub fn closure(
+    order: &[usize],
+    deps: &[Vec<usize>],
+    starts: impl IntoIterator<Item = usize>,
+) -> Vec<usize> {
+    let mut wanted = HashSet::new();
+    for s in starts {
+        wanted.extend(reach(deps, s));
+    }
     order
         .iter()
         .copied()
@@ -331,12 +338,18 @@ pub fn closure(order: &[usize], deps: &[Vec<usize>], start: usize) -> Vec<usize>
         .collect()
 }
 
-/// The modules a command works on, in build order: all of them, or `target` with the modules it needs.
+/// The modules a command works on, in build order: all of them, or `target` (comma-separated) with the modules it needs.
 pub fn select(modules: &[Module], target: Option<&str>) -> Result<Vec<usize>> {
     let all = order(modules)?;
     match target {
         None => Ok(all),
-        Some(t) => Ok(closure(&all, &dependency_edges(modules), find(modules, t)?)),
+        Some(t) => {
+            let mut targets = Vec::new();
+            for part in t.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                targets.push(find(modules, part)?);
+            }
+            Ok(closure(&all, &dependency_edges(modules), targets))
+        }
     }
 }
 
@@ -512,6 +525,14 @@ mod tests {
         assert_eq!(names(&ms, &select(&ms, Some("util")).unwrap()), ["util"]);
         assert_eq!(
             names(&ms, &select(&ms, None).unwrap()),
+            ["util", "lib", "app"]
+        );
+        assert_eq!(
+            names(&ms, &select(&ms, Some("lib, util")).unwrap()),
+            ["util", "lib"]
+        );
+        assert_eq!(
+            names(&ms, &select(&ms, Some("lib,app")).unwrap()),
             ["util", "lib", "app"]
         );
     }
