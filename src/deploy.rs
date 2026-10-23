@@ -294,6 +294,7 @@ mod tests {
             dry_run: false,
             skip_existing: false,
             alt_repo: Some("my-nexus::https://nexus.example.com/maven".into()),
+            info_key: None,
             jobs: None,
         };
         let cfg = Config::default();
@@ -342,6 +343,7 @@ mod tests {
             dry_run: false,
             skip_existing: false,
             alt_repo: None,
+            info_key: None,
             jobs: None,
         };
         let cfg = Config::default();

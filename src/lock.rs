@@ -5,11 +5,23 @@ use crate::pom::{Gav, RepoDecl, extension_of, stored_classifier};
 use crate::repos::{ArtifactFile, Repos};
 use crate::resolve::Resolved;
 use anyhow::{Context, Result};
+use miette::Diagnostic;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
+use thiserror::Error;
+
+/// Structured diagnostic error for missing or stale lockfiles.
+#[derive(Error, Diagnostic, Debug, Clone)]
+#[error("{path} is {status}")]
+pub struct LockError {
+    pub path: String,
+    pub status: &'static str,
+    #[help]
+    pub fix: String,
+}
 
 const VERSION: u32 = 4;
 
@@ -336,5 +348,20 @@ mod tests {
         );
         assert!(previous_repos(&dir.join("missing.lock")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lock_error_diagnostic_formats_error_fix_and_why() {
+        let err = LockError {
+            path: "./mia-scripts/rayvn.lock".into(),
+            status: "out of date",
+            fix:
+                "run `rvn lock` locally and commit the updated lockfile\n      why: pom.xml changed"
+                    .into(),
+        };
+        let formatted = format!("{:?}", miette::Report::new(err));
+        assert!(formatted.contains("./mia-scripts/rayvn.lock is out of date"));
+        assert!(formatted.contains("run `rvn lock` locally"));
+        assert!(formatted.contains("why: pom.xml changed"));
     }
 }

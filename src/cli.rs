@@ -89,6 +89,11 @@ enum Command {
         after_help = "Example:\n  rvn deploy --dry-run    build and stage all artifacts without uploading"
     )]
     Deploy(DeployOpts),
+    /// Print environment and workspace paths and settings (like bazel info)
+    #[command(
+        after_help = "Examples:\n  rvn info              print all paths\n  rvn info cache-dir    print just the cache directory path"
+    )]
+    Info(InfoOpts),
 }
 
 /// Flags every command takes.
@@ -160,6 +165,15 @@ struct TestOpts {
 }
 
 #[derive(ClapArgs, Debug)]
+struct InfoOpts {
+    #[command(flatten)]
+    common: Common,
+    /// Key to query (e.g. cache-dir, test-cache-dir, settings-file)
+    #[arg(value_name = "KEY")]
+    key: Option<String>,
+}
+
+#[derive(ClapArgs, Debug)]
 struct StageOpts {
     #[command(flatten)]
     parallel: Parallel,
@@ -198,6 +212,7 @@ pub enum Cmd {
     Verify,
     Stage,
     Deploy,
+    Info,
 }
 
 impl Cmd {
@@ -212,17 +227,21 @@ impl Cmd {
             Cmd::Verify => "verify",
             Cmd::Stage => "stage",
             Cmd::Deploy => "deploy",
+            Cmd::Info => "info",
         }
     }
 
     /// Commands that only read the dependency set act on the module named with `-m` and nothing it depends on.
     pub fn reads_dependencies_only(self) -> bool {
-        matches!(self, Cmd::Lock | Cmd::Fetch | Cmd::Resolve | Cmd::Classpath)
+        matches!(
+            self,
+            Cmd::Lock | Cmd::Fetch | Cmd::Resolve | Cmd::Classpath | Cmd::Info
+        )
     }
 
     /// Commands whose modules can be worked on side by side: the others print one module's result after another.
     pub fn overlaps_modules(self) -> bool {
-        !matches!(self, Cmd::Resolve | Cmd::Classpath)
+        !matches!(self, Cmd::Resolve | Cmd::Classpath | Cmd::Info)
     }
 
     pub fn runs_tests(self) -> bool {
@@ -248,6 +267,7 @@ pub struct Args {
     pub dry_run: bool,
     pub skip_existing: bool,
     pub alt_repo: Option<String>,
+    pub info_key: Option<String>,
     /// `-j`; `None` means one per CPU.
     pub jobs: Option<usize>,
 }
@@ -285,6 +305,7 @@ impl Args {
             dry_run: false,
             skip_existing: false,
             alt_repo: None,
+            info_key: None,
             jobs: None,
         };
         let with_jobs = |cmd: Cmd, p: Parallel| Args {
@@ -312,6 +333,10 @@ impl Args {
                 skip_existing: d.skip_existing,
                 alt_repo: d.alt_repo,
                 ..with_jobs(Cmd::Deploy, d.parallel)
+            },
+            Command::Info(i) => Args {
+                info_key: i.key,
+                ..base(Cmd::Info, i.common)
             },
         };
         if args.cold && args.cmd == Cmd::Classpath {
@@ -512,6 +537,17 @@ mod tests {
     }
 
     #[test]
+    fn info_command_parses_optional_key() {
+        let i1 = parse(&["info"]);
+        assert_eq!(i1.cmd, Cmd::Info);
+        assert_eq!(i1.info_key, None);
+
+        let i2 = parse(&["info", "cache-dir"]);
+        assert_eq!(i2.cmd, Cmd::Info);
+        assert_eq!(i2.info_key.as_deref(), Some("cache-dir"));
+    }
+
+    #[test]
     fn dash_f_needs_a_path() {
         assert!(Args::parse(&["lock", "-f"]).is_err());
     }
@@ -542,6 +578,7 @@ mod tests {
             "verify",
             "stage",
             "deploy",
+            "info",
         ] {
             assert!(h.contains(c), "help does not mention `{c}`:\n{h}");
         }

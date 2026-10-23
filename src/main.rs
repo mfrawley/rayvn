@@ -55,7 +55,11 @@ mod version;
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("error: {e:#}");
+        if let Some(lock_err) = e.downcast_ref::<lock::LockError>() {
+            eprintln!("{:?}", miette::Report::new(lock_err.clone()));
+        } else {
+            eprintln!("error: {e:#}");
+        }
         std::process::exit(1);
     }
 }
@@ -105,10 +109,33 @@ fn dependencies(
     }
     say!("  resolving dependencies");
     if fetch || args.locked {
-        bail!(
-            "{} is missing or out of date; run `rvn lock`",
-            lock_path.display()
-        );
+        let (status, why) = if lock_path.is_file() {
+            (
+                "out of date",
+                if args.locked {
+                    "pom.xml or an upstream dependency changed, but --locked was passed"
+                } else {
+                    "pom.xml changed since rayvn.lock was written; fetch requires a synchronized lockfile"
+                },
+            )
+        } else {
+            (
+                "missing",
+                if args.locked {
+                    "--locked requires a committed lockfile for reproducible builds in CI"
+                } else {
+                    "fetch downloads only locked dependencies and requires a lockfile"
+                },
+            )
+        };
+        let fix =
+            format!("run `rvn lock` locally and commit the updated lockfile\n      why: {why}");
+        let err = lock::LockError {
+            path: lock_path.display().to_string(),
+            status,
+            fix,
+        };
+        return Err(err.into());
     }
     let resolved = resolve::resolve(&module.effective, loader, repos, true)?;
     lock::write(&lock_path, lock_hash, &resolved, repos)?;
@@ -265,7 +292,7 @@ impl Ctx<'_> {
         let (root, dir) = (&module.effective, module.dir.as_path());
         let mut done = Done::default();
         match args.cmd {
-            Cmd::Lock | Cmd::Fetch => {}
+            Cmd::Lock | Cmd::Fetch | Cmd::Info => {}
             Cmd::Resolve => done.stdout = resolve_lines(&built.resolved),
             Cmd::Classpath => done.stdout = vec![classpath_line(&built.resolved, args.test)],
             Cmd::Build | Cmd::Test | Cmd::Verify | Cmd::Stage | Cmd::Deploy => {
@@ -376,6 +403,145 @@ fn stage_size(b: u64) -> String {
     }
 }
 
+fn dir_size(dir: &std::path::Path) -> (u64, usize) {
+    let mut total_bytes = 0;
+    let mut count = 0;
+    let mut files = vec![];
+    if build::walk(dir, &mut files).is_ok() {
+        for f in files {
+            if let Ok(meta) = std::fs::metadata(&f) {
+                total_bytes += meta.len();
+                count += 1;
+            }
+        }
+    }
+    (total_bytes, count)
+}
+
+/// Connections allowed per host: `$RAYVN_MAX_PER_HOST`, else `rayvn.toml`, else 4.
+fn max_per_host(config: &settings::Config) -> usize {
+    std::env::var("RAYVN_MAX_PER_HOST")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .or(config.max_per_host)
+        .unwrap_or(4)
+}
+
+fn staging_dir(args: &Args, project_dir: &std::path::Path) -> PathBuf {
+    args.stage_dir
+        .clone()
+        .unwrap_or_else(|| project_dir.join("target/staging"))
+}
+
+fn print_info(
+    args: &Args,
+    settings: &settings::Settings,
+    settings_files: &[PathBuf],
+    config: &settings::Config,
+    _config_files: &[PathBuf],
+    project_dir: &std::path::Path,
+) -> Result<()> {
+    let (cache_dir, cache_origin) =
+        match (&settings.local_repo, std::env::var_os("RAYVN_LOCAL_REPO")) {
+            (Some(p), Some(_)) => (p.clone(), "from $RAYVN_LOCAL_REPO"),
+            (Some(p), None) => (p.clone(), "from settings.xml <localRepository>"),
+            (None, _) => (settings::default_cache_dir(), "from default location"),
+        };
+
+    let (cache_bytes, cache_count) = dir_size(&cache_dir);
+    let cache_size_str = if cache_count > 0 {
+        format!("{} ({} files)", stage_size(cache_bytes), cache_count)
+    } else {
+        "empty".to_string()
+    };
+
+    let stage_dir = staging_dir(args, project_dir);
+
+    let test_cache_dir = args
+        .test_cache
+        .clone()
+        .or_else(|| config.test.cache_dir.clone())
+        .or_else(|| std::env::var("RAYVN_TEST_CACHE").ok())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_dir.join(".rayvn-test-cache"));
+
+    let (test_bytes, test_count) = dir_size(&test_cache_dir);
+    let test_size_str = if test_count > 0 {
+        format!("{} ({} files)", stage_size(test_bytes), test_count)
+    } else {
+        "empty".to_string()
+    };
+
+    let settings_file = settings_files
+        .first()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "none".to_string());
+
+    let user_cfg_path = settings::home().join(".rayvn/config.toml");
+    let user_config = if user_cfg_path.is_file() {
+        user_cfg_path.display().to_string()
+    } else {
+        "none".to_string()
+    };
+
+    let proj_cfg_path = project_dir.join("rayvn.toml");
+    let project_config = if proj_cfg_path.is_file() {
+        proj_cfg_path.display().to_string()
+    } else {
+        "none".to_string()
+    };
+
+    let read_only = if config.read_only_repos.is_empty() {
+        "none".to_string()
+    } else {
+        config.read_only_repos.join(":")
+    };
+
+    let max_per_host = max_per_host(config);
+
+    let entries = [
+        (
+            "cache-dir",
+            cache_dir.display().to_string(),
+            Some(cache_origin),
+        ),
+        ("cache-size", cache_size_str, None),
+        ("read-only-repos", read_only, None),
+        ("settings-file", settings_file, None),
+        ("user-config", user_config, None),
+        ("project-config", project_config, None),
+        ("test-cache-dir", test_cache_dir.display().to_string(), None),
+        ("test-cache-size", test_size_str, None),
+        ("staging-dir", stage_dir.display().to_string(), None),
+        ("max-per-host", max_per_host.to_string(), None),
+    ];
+
+    if let Some(key) = &args.info_key {
+        let key_clean = key.trim();
+        for (k, v, _) in &entries {
+            if *k == key_clean {
+                println!("{v}");
+                return Ok(());
+            }
+        }
+        let available = entries
+            .iter()
+            .map(|(k, _, _)| *k)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("unknown info key '{key}'; available keys: {available}");
+    }
+
+    let max_k = entries.iter().map(|(k, _, _)| k.len()).max().unwrap_or(0);
+    for (k, v, origin) in &entries {
+        match origin {
+            Some(o) => println!("{k:<width$}:  {v} ({o})", width = max_k),
+            None => println!("{k:<width$}:  {v}", width = max_k),
+        }
+    }
+    Ok(())
+}
+
 /// The modules `args` acts on, in build order, aggregators left out. Commands that only read dependencies
 /// (`lock`, `fetch`, `resolve`, `classpath`) take just the module named with `-m`; the others also build what it needs.
 fn pick(args: &Args, modules: &[reactor::Module]) -> Result<Vec<usize>> {
@@ -404,7 +570,7 @@ fn pick(args: &Args, modules: &[reactor::Module]) -> Result<Vec<usize>> {
     Ok(chosen)
 }
 
-fn run() -> Result<()> {
+fn init_threadpool() {
     let threads = std::env::var("RAYON_NUM_THREADS")
         .or_else(|_| std::env::var("RAYVN_MAX_THREADS"))
         .ok()
@@ -414,30 +580,21 @@ fn run() -> Result<()> {
         .num_threads(threads)
         .build_global()
         .ok();
-    let args = Args::from_env()?;
-    print_banner();
-    let project_dir = args.project_dir();
-    let t0 = Instant::now();
-    let (mut settings, _) = settings::load()?;
-    let cold_dir = args.cold.then(cold_cache_dir);
-    if let Some(d) = &cold_dir {
-        settings.local_repo = Some(d.clone());
-        eprintln!("rvn: cold run, cache {} (deleted afterwards)", d.display());
-    }
-    let (config, _) = settings::load_config(&project_dir)?;
+}
 
-    let scan = reactor::scan(&args.pom_path, &config.workspace.exclude)?;
-    for g in &scan.unused {
-        eprintln!("warning: [workspace] exclude '{g}' matches no module");
-    }
-    let found = scan.found;
-    let declared: Vec<_> = found
-        .iter()
-        .flat_map(|f| f.poms.repos.iter().cloned())
-        .collect();
-    let repos = repos::Repos::new(&declared, &settings, &config, args.refresh, args.cold)?;
-    let mut loader = model::Loader::new(&repos);
-    let mut modules = reactor::load(found, &loader)?;
+struct Workspace {
+    modules: Vec<reactor::Module>,
+    selected: Vec<usize>,
+    edges: Vec<Vec<usize>>,
+}
+
+fn build_workspace(
+    args: &Args,
+    found: Vec<reactor::Found>,
+    loader: &mut model::Loader,
+    repos: &repos::Repos,
+) -> Result<Workspace> {
+    let mut modules = reactor::load(found, loader)?;
     if let Some(new_ver) = &args.set_version {
         reactor::apply_version_override(&mut modules, new_ver);
     }
@@ -445,7 +602,7 @@ fn run() -> Result<()> {
         loader.register_local(m.effective.clone(), &m.dir);
     }
     let edges = reactor::dependency_edges(&modules);
-    let selected: Vec<usize> = pick(&args, &modules)?;
+    let selected: Vec<usize> = pick(args, &modules)?;
     let many = selected.len() > 1;
     if many && args.cmd == Cmd::Classpath {
         bail!(
@@ -469,6 +626,26 @@ fn run() -> Result<()> {
             String::new()
         }
     );
+    Ok(Workspace {
+        modules,
+        selected,
+        edges,
+    })
+}
+
+fn execute_workspace(
+    ws: &Workspace,
+    args: &Args,
+    repos: &repos::Repos,
+    loader: &model::Loader,
+    config: &settings::Config,
+) -> Result<()> {
+    let Workspace {
+        modules,
+        selected,
+        edges,
+    } = ws;
+    let many = selected.len() > 1;
     let with_tests: HashSet<usize> = if args.cmd.runs_tests() {
         selected
             .iter()
@@ -485,15 +662,15 @@ fn run() -> Result<()> {
     let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
     let jobs = schedule::job_count(args.jobs, cpus, args.cmd.overlaps_modules(), selected.len());
     let cx = Ctx {
-        args: &args,
-        modules: &modules,
-        edges: &edges,
-        repos: &repos,
-        loader: &loader,
-        config: &config,
-        needed: reactor::needed_for_tests(&edges, &selected, &with_tests),
+        args,
+        modules,
+        edges,
+        repos,
+        loader,
+        config,
+        needed: reactor::needed_for_tests(edges, selected, &with_tests),
         with_tests,
-        test_providers: reactor::test_class_providers(&modules, &selected),
+        test_providers: reactor::test_class_providers(modules, selected),
         overlapping: jobs > 1,
     };
     if cx.overlapping {
@@ -558,62 +735,111 @@ fn run() -> Result<()> {
             .iter()
             .for_each(|l| eprintln!("{l}"));
     }
-    if matches!(args.cmd, Cmd::Stage | Cmd::Deploy) {
-        let stage_dir = args
-            .stage_dir
-            .clone()
-            .unwrap_or_else(|| project_dir.join("target/staging"));
-        if stage_dir.is_dir() {
-            let _ = std::fs::remove_dir_all(&stage_dir);
-        }
-        std::fs::create_dir_all(&stage_dir)?;
-        eprintln!("rvn: staging artifacts into {}", stage_dir.display());
-        let mut all_staged = vec![];
-        for &i in &selected {
-            let m = &modules[i];
-            let staged = stage::stage_module(&m.effective, &m.dir, &stage_dir)?;
-            all_staged.extend(staged);
-        }
-        let total_size: u64 = all_staged.iter().map(|s| s.size).sum();
-        eprintln!(
-            "rvn: staged {} artifacts ({}) in {}",
-            all_staged.len(),
-            stage_size(total_size),
-            stage_dir.display()
-        );
-        for s in &all_staged {
-            let rel = s.file.strip_prefix(&stage_dir).unwrap_or(&s.file);
-            eprintln!("  {}", rel.display());
-        }
-        if args.cmd == Cmd::Deploy && !args.dry_run {
-            let root_effective = &modules[selected[0]].effective;
-            let target = deploy::resolve_target_repo(&args, &config, root_effective)?;
-            let auth = deploy::resolve_deploy_auth(&target, &config, &settings)?;
+    Ok(())
+}
 
-            let default_max_per_host = std::env::var("RAYVN_MAX_PER_HOST")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .or(config.max_per_host)
-                .unwrap_or(4);
-            let mut custom_limits = std::collections::HashMap::new();
-            for (h, mc) in &config.hosts {
-                let key = repos::host_of(h);
-                custom_limits
-                    .entry(key)
-                    .and_modify(|existing: &mut usize| *existing = (*existing).min(*mc))
-                    .or_insert(*mc);
-            }
-            let limiter = repos::HostLimiter::new(default_max_per_host, custom_limits);
-
-            deploy::upload_staged(
-                &stage_dir,
-                &target,
-                auth.as_ref(),
-                &limiter,
-                args.skip_existing,
-            )?;
-        }
+fn handle_stage_and_deploy(
+    ws: &Workspace,
+    args: &Args,
+    config: &settings::Config,
+    settings: &settings::Settings,
+    project_dir: &std::path::Path,
+) -> Result<()> {
+    let Workspace {
+        modules, selected, ..
+    } = ws;
+    let stage_dir = staging_dir(args, project_dir);
+    if stage_dir.is_dir() {
+        let _ = std::fs::remove_dir_all(&stage_dir);
     }
+    std::fs::create_dir_all(&stage_dir)?;
+    eprintln!("rvn: staging artifacts into {}", stage_dir.display());
+    let mut all_staged = vec![];
+    for &i in selected {
+        let m = &modules[i];
+        let staged = stage::stage_module(&m.effective, &m.dir, &stage_dir)?;
+        all_staged.extend(staged);
+    }
+    let total_size: u64 = all_staged.iter().map(|s| s.size).sum();
+    eprintln!(
+        "rvn: staged {} artifacts ({}) in {}",
+        all_staged.len(),
+        stage_size(total_size),
+        stage_dir.display()
+    );
+    for s in &all_staged {
+        let rel = s.file.strip_prefix(&stage_dir).unwrap_or(&s.file);
+        eprintln!("  {}", rel.display());
+    }
+    if args.cmd == Cmd::Deploy && !args.dry_run {
+        let root_effective = &modules[selected[0]].effective;
+        let target = deploy::resolve_target_repo(args, config, root_effective)?;
+        let auth = deploy::resolve_deploy_auth(&target, config, settings)?;
+
+        let mut custom_limits = std::collections::HashMap::new();
+        for (h, mc) in &config.hosts {
+            let key = repos::host_of(h);
+            custom_limits
+                .entry(key)
+                .and_modify(|existing: &mut usize| *existing = (*existing).min(*mc))
+                .or_insert(*mc);
+        }
+        let limiter = repos::HostLimiter::new(max_per_host(config), custom_limits);
+
+        deploy::upload_staged(
+            &stage_dir,
+            &target,
+            auth.as_ref(),
+            &limiter,
+            args.skip_existing,
+        )?;
+    }
+    Ok(())
+}
+
+fn run() -> Result<()> {
+    init_threadpool();
+    let args = Args::from_env()?;
+    print_banner();
+    let project_dir = args.project_dir();
+    let t0 = Instant::now();
+    let (mut settings, settings_files) = settings::load()?;
+    let cold_dir = args.cold.then(cold_cache_dir);
+    if let Some(d) = &cold_dir {
+        settings.local_repo = Some(d.clone());
+        eprintln!("rvn: cold run, cache {} (deleted afterwards)", d.display());
+    }
+    let (config, config_files) = settings::load_config(&project_dir)?;
+
+    if args.cmd == Cmd::Info {
+        return print_info(
+            &args,
+            &settings,
+            &settings_files,
+            &config,
+            &config_files,
+            &project_dir,
+        );
+    }
+
+    let scan = reactor::scan(&args.pom_path, &config.workspace.exclude)?;
+    for g in &scan.unused {
+        eprintln!("warning: [workspace] exclude '{g}' matches no module");
+    }
+    let found = scan.found;
+    let declared: Vec<_> = found
+        .iter()
+        .flat_map(|f| f.poms.repos.iter().cloned())
+        .collect();
+    let repos = repos::Repos::new(&declared, &settings, &config, args.refresh, args.cold)?;
+    let mut loader = model::Loader::new(&repos);
+    let ws = build_workspace(&args, found, &mut loader, &repos)?;
+    execute_workspace(&ws, &args, &repos, &loader, &config)?;
+
+    if matches!(args.cmd, Cmd::Stage | Cmd::Deploy) {
+        handle_stage_and_deploy(&ws, &args, &config, &settings, &project_dir)?;
+    }
+
     eprintln!("done in {:?}", t0.elapsed());
     if let Some(d) = cold_dir {
         let _ = std::fs::remove_dir_all(d);

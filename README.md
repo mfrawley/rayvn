@@ -27,6 +27,7 @@ rvn <command> [-f pom.xml] [-m module] [-j N] [--locked] [--refresh] [--cold]
 | `verify` | `test`, then package, then the integration tests (failsafe settings). |
 | `stage` | Build and stage all artifacts and checksums (`.sha256`, `.sha1`, `.md5`) into `target/staging/` in Maven repository layout. |
 | `deploy` | Build and stage artifacts locally, then upload them via HTTP PUT to a remote Maven repository. |
+| `info` | Print workspace and environment paths, settings, and cache sizes (like `bazel info`). |
 
 | Flag | Meaning |
 |---|---|
@@ -64,6 +65,8 @@ rvn deploy --set-version 20261022.1 --alt-repo my-repo::https://repo.example.com
 rvn test --rerun                  # run the tests even if their inputs are unchanged
 rvn resolve | grep guava          # which version of guava did we get?
 java -cp "$(rvn classpath):target/classes" app.Main
+rvn info                          # print all cache paths, sizes, and config sources
+rvn info cache-dir                # print just the cache directory path (for scripts)
 rvn lock --cold                   # time a resolve from an empty cache
 rvn --version                     # commit, build time and name of this binary
 ```
