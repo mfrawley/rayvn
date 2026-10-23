@@ -80,12 +80,21 @@ pub struct StagedArtifact {
     pub checksums: Checksums,
 }
 
-/// Stages `source` into `dest_dir`, writing sidecar checksums. Returns the staged artifact info.
-pub fn stage_file(source: &Path, dest_dir: &Path) -> Result<StagedArtifact> {
+/// Stages `source` into `dest_dir` under `target_name` (or its own filename), writing sidecar checksums.
+pub fn stage_file_as(
+    source: &Path,
+    dest_dir: &Path,
+    target_name: Option<&str>,
+) -> Result<StagedArtifact> {
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("creating directory {}", dest_dir.display()))?;
-    let name = source.file_name().context("source file has no file name")?;
-    let dest = dest_dir.join(name);
+    let dest = match target_name {
+        Some(name) => dest_dir.join(name),
+        None => {
+            let name = source.file_name().context("source file has no file name")?;
+            dest_dir.join(name)
+        }
+    };
     std::fs::copy(source, &dest)
         .with_context(|| format!("staging {} to {}", source.display(), dest.display()))?;
     let checksums = hash_file(&dest)?;
@@ -96,6 +105,11 @@ pub fn stage_file(source: &Path, dest_dir: &Path) -> Result<StagedArtifact> {
         size,
         checksums,
     })
+}
+
+/// Stages `source` into `dest_dir`, writing sidecar checksums. Returns the staged artifact info.
+pub fn stage_file(source: &Path, dest_dir: &Path) -> Result<StagedArtifact> {
+    stage_file_as(source, dest_dir, None)
 }
 
 /// Stages all built artifacts of `module` (POM, JAR, and any shaded/attached JARs) into `stage_dir`.
@@ -143,7 +157,20 @@ pub fn stage_module(
                 &effective.props,
             );
             if shaded_file.is_file() && shaded_file != jar_file {
-                staged.push(stage_file(&shaded_file, &dest_dir)?);
+                let staged_name = if shade.attached {
+                    let classifier = shade.classifier.as_deref().unwrap_or("shaded");
+                    Some(format!(
+                        "{}-{}-{classifier}.jar",
+                        effective.gav.artifact, effective.gav.version
+                    ))
+                } else {
+                    None
+                };
+                staged.push(stage_file_as(
+                    &shaded_file,
+                    &dest_dir,
+                    staged_name.as_deref(),
+                )?);
             }
         }
     }
@@ -243,11 +270,11 @@ mod tests {
 
         assert_eq!(
             names,
-            vec!["my-app-1.0.pom", "my-app-1.0.jar", "my-app-1.0-fat.jar"]
+            vec!["my-app-1.0.pom", "my-app-1.0.jar", "my-app-1.0-shaded.jar"]
         );
         assert!(
             stage_dir
-                .join("com/example/my-app/1.0/my-app-1.0-fat.jar.sha256")
+                .join("com/example/my-app/1.0/my-app-1.0-shaded.jar.sha256")
                 .is_file()
         );
         let _ = std::fs::remove_dir_all(&temp);
