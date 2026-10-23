@@ -1,26 +1,27 @@
 #!/bin/sh
 # Release script for rayvn.
 # Bumps version (patch, minor, major, or explicit X.Y.Z), updates Cargo.lock,
-# runs pre-flight checks, and creates git release commit and tag.
+# runs pre-flight checks, creates the git release commit and tag, and publishes
+# (crates.io, then pushes commit and tag). Pass --no-publish to stop after the commit.
 #
 # Usage:
-#   ./scripts/release.sh <patch|minor|major|X.Y.Z> [--dry-run] [--publish]
+#   ./scripts/release.sh <patch|minor|major|X.Y.Z> [--dry-run] [--no-publish]
 
 set -e
 
 if [ -z "$1" ]; then
-    echo "Usage: $0 <patch|minor|major|X.Y.Z> [--dry-run] [--publish]"
+    echo "Usage: $0 <patch|minor|major|X.Y.Z> [--dry-run] [--no-publish]"
     exit 1
 fi
 
 BUMP_TYPE="$1"
 DRY_RUN=0
-PUBLISH=0
+PUBLISH=1
 
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
-        --publish) PUBLISH=1 ;;
+        --no-publish) PUBLISH=0 ;;
     esac
 done
 
