@@ -71,7 +71,7 @@ One `rayvn.lock` per module, as now; no root lockfile until we need one.
 
 ### Results (2026-10-21)
 
-Steps 1 to 3 are done (`src/reactor.rs`, `docs/workspace.md`); step 4 is not: modules build one after another. A sibling is matched on exact coordinates and read from `target/classes`; the lock records it as `workspace = true`. Checked on a two-module demo, including `fetch`, `--locked` and a shaded app containing its sibling, and on matsim-moia (single module, unchanged).
+Steps 1 to 3 are done (`src/reactor.rs`, `docs/workspace.md`); step 4 is not: modules build one after another. A sibling is matched on exact coordinates and read from `target/classes`; the lock records it as `workspace = true`. Checked on a two-module demo, including `fetch`, `--locked` and a shaded app containing its sibling, and on a single-module project (single module, unchanged).
 
 ### Results on a real workspace (2026-10-21)
 
@@ -101,14 +101,14 @@ Per-module resolution means modules may differ; they conflict only where both re
 versions = "per-module"   # default
 # "check":   fail if modules resolve different versions of an artifact
 # "unified": highest wins, every module re-resolved with it imposed
-allow = ["org.matsim:matsim"]
+allow = ["org.example:core"]
 ```
 
 `check` first. Gradle: one version per configuration by default, `failOnVersionConflict()`, platforms for alignment. Bazel: one version per artifact is the rule (`maven_install` per repo to opt out). uv: one lock for the workspace, resolved together. Nix: separate store paths, which does not help on a single classpath.
 
 ### Tests across the workspace
 
-`rvn test` at the root of the transport-modeling workspace runs the 3 modules that have tests (matsim-moia 15, routing-map-conversion 4, 21 modules have none) and reports a per-module table; a second run is served from the test cache (28.8 s total, mostly resolving and compiling). Fixed on the way: the test JVM runs in the module directory, so a relative classpath from a root-level `-f pom.xml` failed with `ClassNotFoundException`; entries are now absolute.
+`rvn test` at the root of a multi-module workspace runs the 3 modules that have tests (lib-core 15, sub-service 4, 21 modules have none) and reports a per-module table; a second run is served from the test cache (28.8 s total, mostly resolving and compiling). Fixed on the way: the test JVM runs in the module directory, so a relative classpath from a root-level `-f pom.xml` failed with `ClassNotFoundException`; entries are now absolute.
 
 ### Version ranges
 

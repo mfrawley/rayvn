@@ -78,13 +78,18 @@ impl LocalModules {
     }
 
     pub fn get(&self, gav: &Gav) -> Option<&LocalModule> {
-        self.modules.get(gav)
+        self.modules.get(gav).or_else(|| {
+            self.modules
+                .iter()
+                .find(|(k, _)| k.group == gav.group && k.artifact == gav.artifact)
+                .map(|(_, m)| m)
+        })
     }
 
     /// The directory that stands in for the artifact: the classes for the plain jar, the test classes for the
     /// `tests` classifier. `None` for the module's other classifiers, and for artifacts that are not modules.
     pub fn output(&self, gav: &Gav, classifier: Option<&str>, typ: &str) -> Option<PathBuf> {
-        let m = self.modules.get(gav)?;
+        let m = self.get(gav)?;
         match (classifier, typ) {
             (Some("tests"), _) => Some(m.test_classes.clone()),
             (None, "jar" | "bundle") => Some(m.classes.clone()),
@@ -583,8 +588,13 @@ mod tests {
         assert_eq!(locals.output(&gav, Some("sources"), "jar"), None);
         assert_eq!(
             locals.output(&Gav::new("g", "lib", "2"), None, "jar"),
+            Some(PathBuf::from("/w/lib/target/classes")),
+            "group and artifact match workspace module across versions"
+        );
+        assert_eq!(
+            locals.output(&Gav::new("g", "other", "1"), None, "jar"),
             None,
-            "another version is not the module"
+            "non-workspace module is None"
         );
         assert!(locals.get(&gav).is_some());
     }

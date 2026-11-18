@@ -351,16 +351,67 @@ mod tests {
     }
 
     #[test]
+    fn realize_workspace_module_matches_across_version_overrides() {
+        let lock = Lock {
+            version: VERSION,
+            pom_sha256: "hash".into(),
+            package: vec![Pkg {
+                group: "g".into(),
+                artifact: "sub-module".into(),
+                version: "1.0-SNAPSHOT".into(),
+                classifier: None,
+                typ: "jar".into(),
+                scope: "compile".into(),
+                depth: 1,
+                via: None,
+                repo: None,
+                repo_url: None,
+                sha256: None,
+                workspace: true,
+            }],
+        };
+        let repos =
+            Repos::new(&[], &Default::default(), &Default::default(), false, false).unwrap();
+        let mut locals = crate::model::LocalModules::default();
+        let effective = crate::model::Effective {
+            gav: Gav::new("g", "sub-module", "20261117-2032"),
+            parent: None,
+            packaging: "jar".into(),
+            props: Default::default(),
+            managed: Default::default(),
+            deps: vec![],
+            repos: vec![],
+            shade: None,
+            compiler: None,
+            unrun: vec![],
+            surefire: None,
+            failsafe: None,
+            relocation: None,
+            distribution: None,
+        };
+        locals.register(effective, Path::new("/workspace/sub-module"));
+        let realized = realize(&lock, &repos, &locals).unwrap();
+        assert_eq!(realized.len(), 1);
+        assert_eq!(
+            realized[0].jar,
+            Some(std::path::PathBuf::from(
+                "/workspace/sub-module/target/classes"
+            ))
+        );
+        assert!(realized[0].workspace);
+    }
+
+    #[test]
     fn lock_error_diagnostic_formats_error_fix_and_why() {
         let err = LockError {
-            path: "./mia-scripts/rayvn.lock".into(),
+            path: "./sub-module/rayvn.lock".into(),
             status: "out of date",
             fix:
                 "run `rvn lock` locally and commit the updated lockfile\n      why: pom.xml changed"
                     .into(),
         };
         let formatted = format!("{:?}", miette::Report::new(err));
-        assert!(formatted.contains("./mia-scripts/rayvn.lock is out of date"));
+        assert!(formatted.contains("./sub-module/rayvn.lock is out of date"));
         assert!(formatted.contains("run `rvn lock` locally"));
         assert!(formatted.contains("why: pom.xml changed"));
     }

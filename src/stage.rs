@@ -216,10 +216,10 @@ mod tests {
 
     #[test]
     fn gav_rel_dir_follows_maven_layout() {
-        let gav = Gav::new("io.moia.transport", "core", "1.2.3");
+        let gav = Gav::new("com.example.app", "core", "1.2.3");
         assert_eq!(
             gav_rel_dir(&gav),
-            PathBuf::from("io/moia/transport/core/1.2.3")
+            PathBuf::from("com/example/app/core/1.2.3")
         );
     }
 

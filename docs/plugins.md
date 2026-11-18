@@ -15,7 +15,7 @@ rayvn does not run Maven plugins. It reads the configuration of the few that cha
 
 `exec:java` and `exec:exec` run a program by hand (`mvn exec:java`). A build only needs the plugin when an `<execution>` binds it to a phase such as `generate-sources` or `package`, so that its output feeds the jar.
 
-In the transport-modeling workspace (24 modules) no module does that. `aws-infra` declares the plugin with a `mainClass`, and `cdk.json` runs `mvn exec:java` to start the CDK app; it has no `<execution>`, so `rvn build` produces the same jar without it.
+In a multi-module workspace (24 modules) no module does that. `aws-infra` declares the plugin with a `mainClass`, and `cdk.json` runs `mvn exec:java` to start the CDK app; it has no `<execution>`, so `rvn build` produces the same jar without it.
 
 So rayvn does not run `exec`, and nothing we have validated needs it. A POM that does bind it to a phase will build differently from Maven, so `build`, `test` and `verify` warn:
 
@@ -23,7 +23,7 @@ So rayvn does not run `exec`, and nothing we have validated needs it. A POM that
 warning: gen: Maven runs exec-maven-plugin (exec at generate-sources) during the build; rayvn does not, so the output may differ (docs/plugins.md)
 ```
 
-The warning covers any `<execution>` of a plugin not in the table above, from the module's POM or its parents. A plugin that is only configured, or an execution with `<phase>none</phase>`, draws none; neither runs in a build. The `clean`, `install`, `deploy` and `site` plugins are also quiet, since skipping them changes no build output. Running the program yourself is `java -cp "$(rvn classpath):target/classes" io.moia.aws.infra.Run`.
+The warning covers any `<execution>` of a plugin not in the table above, from the module's POM or its parents. A plugin that is only configured, or an execution with `<phase>none</phase>`, draws none; neither runs in a build. The `clean`, `install`, `deploy` and `site` plugins are also quiet, since skipping them changes no build output. Running the program yourself is `java -cp "$(rvn classpath):target/classes" com.example.aws.infra.Run`.
 
 The same holds for `protoc` (`protobuf-maven-plugin`, `protoc-jar-maven-plugin`): its generated sources are needed only when the plugin is active, and the one POM that mentions it has it commented out.
 

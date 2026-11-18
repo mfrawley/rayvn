@@ -56,7 +56,7 @@ fn select_tests(files: &[String], cfg: &TestCfg, defaults: &[&str]) -> Vec<Strin
         .collect()
 }
 
-/// `io/moia/FooTest.java` -> `io.moia.FooTest`.
+/// `com/example/FooTest.java` -> `com.example.FooTest`.
 fn class_name(source: &str) -> String {
     source.trim_end_matches(".java").replace('/', ".")
 }
@@ -570,7 +570,10 @@ mod tests {
 
     #[test]
     fn class_names_come_from_source_paths() {
-        assert_eq!(class_name("io/moia/FooTest.java"), "io.moia.FooTest");
+        assert_eq!(
+            class_name("com/example/FooTest.java"),
+            "com.example.FooTest"
+        );
         assert_eq!(class_name("FooTest.java"), "FooTest");
     }
 

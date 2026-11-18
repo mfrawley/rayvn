@@ -25,7 +25,7 @@ A POM that lists `<modules>` makes a workspace. Run `rvn` at the root, or with `
 
   ```
   tests by module:
-    matsim-moia: 15 passed (15 cached)
+    lib-core: 15 passed (15 cached)
     routing-map-conversion: 4 passed
     total: 19 passed in 2 modules (15 cached); 21 modules have no tests
   ```

@@ -164,10 +164,8 @@ pub fn load(found: Vec<Found>, loader: &Loader) -> Result<Vec<Module>> {
 
 /// Overrides the version across all workspace modules, their properties, parent references, and sibling dependencies.
 pub fn apply_version_override(modules: &mut [Module], new_version: &str) {
-    let old_versions: HashMap<String, String> = modules
-        .iter()
-        .map(|m| (m.gav().artifact.clone(), m.gav().version.clone()))
-        .collect();
+    let workspace_artifacts: HashSet<String> =
+        modules.iter().map(|m| m.gav().artifact.clone()).collect();
 
     for m in modules.iter_mut() {
         m.effective.gav.version = new_version.to_string();
@@ -179,16 +177,20 @@ pub fn apply_version_override(modules: &mut [Module], new_version: &str) {
             .insert("version".into(), new_version.to_string());
 
         if let Some(parent) = &mut m.effective.parent
-            && old_versions.contains_key(&parent.artifact)
+            && workspace_artifacts.contains(&parent.artifact)
         {
             parent.version = new_version.to_string();
         }
 
         for dep in &mut m.effective.deps {
-            if let Some(old_v) = old_versions.get(&dep.artifact)
-                && dep.version.as_deref() == Some(old_v.as_str())
-            {
+            if workspace_artifacts.contains(&dep.artifact) {
                 dep.version = Some(new_version.to_string());
+            }
+        }
+
+        for managed_dep in m.effective.managed.values_mut() {
+            if workspace_artifacts.contains(&managed_dep.artifact) {
+                managed_dep.version = Some(new_version.to_string());
             }
         }
     }
@@ -587,6 +589,17 @@ mod tests {
         let parent = module("root", &[], "pom", &["child"]);
         let mut child = module("child", &[("root", "1")], "jar", &[]);
         child.effective.parent = Some(parent.gav().clone());
+        let managed_dep = Dep {
+            group: "g".into(),
+            artifact: "root".into(),
+            version: Some("1".into()),
+            typ: "jar".into(),
+            ..Default::default()
+        };
+        child
+            .effective
+            .managed
+            .insert(managed_dep.key(), managed_dep);
         let mut ms = vec![parent, child];
 
         apply_version_override(&mut ms, "2026.10");
@@ -594,6 +607,16 @@ mod tests {
         assert_eq!(ms[1].gav().version, "2026.10");
         assert_eq!(ms[1].effective.parent.as_ref().unwrap().version, "2026.10");
         assert_eq!(ms[1].effective.deps[0].version.as_deref(), Some("2026.10"));
+        assert_eq!(
+            ms[1]
+                .effective
+                .managed
+                .get("g:root:jar:")
+                .unwrap()
+                .version
+                .as_deref(),
+            Some("2026.10")
+        );
         assert_eq!(
             ms[1].effective.props.get("project.version").unwrap(),
             "2026.10"
